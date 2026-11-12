@@ -377,15 +377,7 @@ async fn test_sqlite_cache_retrocompatibility_with_uncompressed_text() {
 
     let cache = SqliteCacheAdapter::new(&db_path).unwrap();
 
-    let hash = {
-        use std::hash::{DefaultHasher, Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        "en".hash(&mut hasher);
-        "pt-BR".hash(&mut hasher);
-        "google-free".hash(&mut hasher);
-        "legacy_key".hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
-    };
+    let hash = SqliteCacheAdapter::calculate_hash("en", "pt-BR", "google-free", "legacy_key");
 
     {
         let raw_conn = rusqlite::Connection::open(&db_path).unwrap();

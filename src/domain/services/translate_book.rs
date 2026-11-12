@@ -360,22 +360,79 @@ impl TranslateBookUseCase {
     }
 }
 
-fn update_xml_tag(xml: &str, tag_name: &str, new_value: &str) -> String {
-    let open_tag = format!("<{tag_name}>");
-    let close_tag = format!("</{tag_name}>");
+pub fn update_xml_tag(xml: &str, tag_name: &str, new_value: &str) -> String {
+    use quick_xml::events::{BytesEnd, BytesText, Event};
+    use quick_xml::reader::Reader;
+    use quick_xml::writer::Writer;
+    use std::io::Cursor;
 
-    if let Some(start_pos) = xml.find(&open_tag)
-        && let Some(end_pos) = xml[start_pos..].find(&close_tag)
-    {
-        let actual_end = start_pos + end_pos + close_tag.len();
-        let mut result = String::with_capacity(xml.len() + new_value.len());
-        result.push_str(&xml[..start_pos]);
-        result.push_str(&open_tag);
-        result.push_str(new_value);
-        result.push_str(&close_tag);
-        result.push_str(&xml[actual_end..]);
-        return result;
+    let target_bytes = tag_name.as_bytes();
+    let target_local = if let Some(pos) = tag_name.find(':') {
+        &tag_name[pos + 1..]
+    } else {
+        tag_name
+    }
+    .as_bytes();
+
+    let mut reader = Reader::from_str(xml);
+    let mut writer = Writer::new(Cursor::new(Vec::with_capacity(xml.len() + new_value.len())));
+    let mut inside_target = false;
+    let mut replaced = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = e.name();
+                let local = e.local_name();
+                if !replaced && (name.as_ref() == target_bytes || local.as_ref() == target_local) {
+                    inside_target = true;
+                    let _ = writer.write_event(Event::Start(e));
+                    let _ = writer.write_event(Event::Text(BytesText::new(new_value)));
+                } else {
+                    let _ = writer.write_event(Event::Start(e));
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = e.name();
+                let local = e.local_name();
+                if inside_target
+                    && (name.as_ref() == target_bytes || local.as_ref() == target_local)
+                {
+                    inside_target = false;
+                    replaced = true;
+                    let _ = writer.write_event(Event::End(e));
+                } else {
+                    let _ = writer.write_event(Event::End(e));
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = e.name();
+                let local = e.local_name();
+                if !replaced && (name.as_ref() == target_bytes || local.as_ref() == target_local) {
+                    let end_bytes = e.name().as_ref().to_vec();
+                    let _ = writer.write_event(Event::Start(e));
+                    let _ = writer.write_event(Event::Text(BytesText::new(new_value)));
+                    let _ = writer.write_event(Event::End(BytesEnd::new(
+                        std::str::from_utf8(&end_bytes).unwrap_or(tag_name),
+                    )));
+                    replaced = true;
+                } else {
+                    let _ = writer.write_event(Event::Empty(e));
+                }
+            }
+            Ok(Event::Text(_)) | Ok(Event::CData(_)) if inside_target => {}
+            Ok(Event::Eof) => break,
+            Ok(event) => {
+                let _ = writer.write_event(event);
+            }
+            Err(_) => return xml.to_string(),
+        }
     }
 
-    xml.to_string()
+    if replaced {
+        let result_bytes = writer.into_inner().into_inner();
+        String::from_utf8(result_bytes).unwrap_or_else(|_| xml.to_string())
+    } else {
+        xml.to_string()
+    }
 }

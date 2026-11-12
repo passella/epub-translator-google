@@ -5,6 +5,8 @@ use crate::domain::errors::EpubError;
 use crate::domain::ports::EpubPort;
 use crate::domain::services::XhtmlValidator;
 use async_trait::async_trait;
+use quick_xml::events::Event;
+use quick_xml::reader::Reader;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -18,20 +20,39 @@ impl ZipEpubAdapter {
         Self
     }
 
-    fn find_opf_path_from_container_xml(xml: &str) -> Result<String, EpubError> {
-        let needle = "full-path=\"";
-        if let Some(start_pos) = xml.find(needle) {
-            let rest = &xml[start_pos + needle.len()..];
-            if let Some(end_pos) = rest.find('"') {
-                return Ok(rest[..end_pos].to_string());
-            }
-        }
+    pub fn find_opf_path_from_container_xml(xml: &str) -> Result<String, EpubError> {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(true);
 
-        let needle_single = "full-path='";
-        if let Some(start_pos) = xml.find(needle_single) {
-            let rest = &xml[start_pos + needle_single.len()..];
-            if let Some(end_pos) = rest.find('\'') {
-                return Ok(rest[..end_pos].to_string());
+        loop {
+            match reader.read_event() {
+                Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                    let local_name = e.local_name();
+                    if local_name.as_ref() == b"rootfile" {
+                        for attr in e.attributes() {
+                            let attr = attr.map_err(|err| {
+                                EpubError::Xml(format!(
+                                    "Failed to parse container.xml attribute: {err}"
+                                ))
+                            })?;
+                            if attr.key.as_ref() == b"full-path" {
+                                let val = attr.unescape_value().map_err(|err| {
+                                    EpubError::Xml(format!(
+                                        "Failed to unescape full-path attribute: {err}"
+                                    ))
+                                })?;
+                                if !val.is_empty() {
+                                    return Ok(val.into_owned());
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(err) => {
+                    return Err(EpubError::Xml(format!("XML error in container.xml: {err}")));
+                }
+                _ => {}
             }
         }
 
@@ -40,7 +61,7 @@ impl ZipEpubAdapter {
         ))
     }
 
-    fn parse_opf_metadata(xml: &str) -> EpubMetadata {
+    pub fn parse_opf_metadata(xml: &str) -> EpubMetadata {
         let title = extract_tag_content(xml, "dc:title");
         let language = extract_tag_content(xml, "dc:language").map(Language::new);
         let creator = extract_tag_content(xml, "dc:creator");
@@ -55,33 +76,8 @@ impl ZipEpubAdapter {
             publisher,
         }
     }
-}
 
-impl Default for ZipEpubAdapter {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-fn extract_tag_content(xml: &str, tag_name: &str) -> Option<String> {
-    let open_tag = format!("<{tag_name}");
-    let close_tag = format!("</{tag_name}>");
-
-    let start = xml.find(&open_tag)?;
-    let tag_end = xml[start..].find('>')? + start + 1;
-    let end = xml[tag_end..].find(&close_tag)? + tag_end;
-
-    let text = xml[tag_end..end].trim();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    }
-}
-
-#[async_trait]
-impl EpubPort for ZipEpubAdapter {
-    async fn read_epub(&self, path: &Path) -> Result<EpubBook, EpubError> {
+    fn read_epub_sync(path: &Path) -> Result<EpubBook, EpubError> {
         let file = File::open(path).map_err(EpubError::Io)?;
         let reader = BufReader::new(file);
         let mut archive = ZipArchive::new(reader)
@@ -161,7 +157,7 @@ impl EpubPort for ZipEpubAdapter {
         })
     }
 
-    async fn write_epub(&self, book: &EpubBook, path: &Path) -> Result<(), EpubError> {
+    fn write_epub_sync(book: &EpubBook, path: &Path) -> Result<(), EpubError> {
         let file = File::create(path).map_err(EpubError::Io)?;
         let writer = BufWriter::new(file);
         let mut zip = ZipWriter::new(writer);
@@ -231,7 +227,7 @@ impl EpubPort for ZipEpubAdapter {
         Ok(())
     }
 
-    async fn verify_epub(&self, path: &Path) -> Result<EpubVerificationReport, EpubError> {
+    fn verify_epub_sync(path: &Path) -> Result<EpubVerificationReport, EpubError> {
         let file = File::open(path).map_err(EpubError::Io)?;
         let reader = BufReader::new(file);
         let mut archive = ZipArchive::new(reader).map_err(|e| {
@@ -403,5 +399,97 @@ impl EpubPort for ZipEpubAdapter {
             valid_xhtml_files,
             errors,
         })
+    }
+}
+
+impl Default for ZipEpubAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn extract_tag_content(xml: &str, tag_name: &str) -> Option<String> {
+    let target_bytes = tag_name.as_bytes();
+    let target_local = if let Some(pos) = tag_name.find(':') {
+        &tag_name[pos + 1..]
+    } else {
+        tag_name
+    }
+    .as_bytes();
+
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut inside_tag = false;
+    let mut collected_text = String::new();
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                let name = e.name();
+                let local = e.local_name();
+                if name.as_ref() == target_bytes || local.as_ref() == target_local {
+                    inside_tag = true;
+                    collected_text.clear();
+                }
+            }
+            Ok(Event::Text(ref e)) if inside_tag => {
+                if let Ok(text) = e.unescape() {
+                    collected_text.push_str(&text);
+                }
+            }
+            Ok(Event::CData(ref e)) if inside_tag => {
+                if let Ok(text) = std::str::from_utf8(e.as_ref()) {
+                    collected_text.push_str(text);
+                }
+            }
+            Ok(Event::End(ref e)) => {
+                let name = e.name();
+                let local = e.local_name();
+                if inside_tag && (name.as_ref() == target_bytes || local.as_ref() == target_local) {
+                    let trimmed = collected_text.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                    inside_tag = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+    }
+
+    None
+}
+
+#[async_trait]
+impl EpubPort for ZipEpubAdapter {
+    async fn read_epub(&self, path: &Path) -> Result<EpubBook, EpubError> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::read_epub_sync(&path))
+            .await
+            .map_err(|e| {
+                EpubError::Io(std::io::Error::other(format!("Task execution failed: {e}")))
+            })?
+    }
+
+    async fn write_epub(&self, book: &EpubBook, path: &Path) -> Result<(), EpubError> {
+        let book = book.clone();
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::write_epub_sync(&book, &path))
+            .await
+            .map_err(|e| {
+                EpubError::Io(std::io::Error::other(format!("Task execution failed: {e}")))
+            })?
+    }
+
+    async fn verify_epub(&self, path: &Path) -> Result<EpubVerificationReport, EpubError> {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || Self::verify_epub_sync(&path))
+            .await
+            .map_err(|e| {
+                EpubError::Io(std::io::Error::other(format!("Task execution failed: {e}")))
+            })?
     }
 }

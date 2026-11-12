@@ -3,10 +3,9 @@ use crate::domain::errors::CacheError;
 use crate::domain::ports::TranslationCachePort;
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub struct SqliteCacheAdapter {
     conn: Arc<Mutex<Connection>>,
@@ -56,106 +55,135 @@ impl SqliteCacheAdapter {
     }
 
     pub async fn purge_corrupted_entries(&self) -> Result<usize, CacheError> {
-        let conn = self.conn.lock().await;
-        let count = conn
-            .execute(
-                "DELETE FROM translations WHERE length(translated_text) = 0 OR (typeof(translated_text) = 'text' AND trim(translated_text, ' ' || char(9) || char(10) || char(13)) = '');",
-                [],
-            )
-            .map_err(|e| CacheError::Database(format!("Failed to purge corrupted cache entries: {e}")))?;
-        Ok(count)
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| CacheError::Database(format!("Database lock poisoned: {e}")))?;
+            let count = conn
+                .execute(
+                    "DELETE FROM translations WHERE length(translated_text) = 0 OR (typeof(translated_text) = 'text' AND trim(translated_text, ' ' || char(9) || char(10) || char(13)) = '');",
+                    [],
+                )
+                .map_err(|e| CacheError::Database(format!("Failed to purge corrupted cache entries: {e}")))?;
+            Ok(count)
+        })
+        .await
+        .map_err(|e| CacheError::Database(format!("Task execution failed: {e}")))?
     }
 
-    fn calculate_hash(source_lang: &str, target_lang: &str, provider: &str, text: &str) -> String {
-        let mut hasher = DefaultHasher::new();
-        source_lang.hash(&mut hasher);
-        target_lang.hash(&mut hasher);
-        provider.hash(&mut hasher);
-        text.hash(&mut hasher);
-        format!("{:016x}", hasher.finish())
+    pub fn calculate_hash(
+        source_lang: &str,
+        target_lang: &str,
+        provider: &str,
+        text: &str,
+    ) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(source_lang.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(target_lang.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(provider.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(text.as_bytes());
+        format!("{:x}", hasher.finalize())
     }
 
-    fn calculate_block_hash(
+    pub fn calculate_block_hash(
         source_lang: &str,
         target_lang: &str,
         provider: &str,
         block_text: &str,
     ) -> String {
-        let mut hasher = DefaultHasher::new();
-        "blk".hash(&mut hasher);
-        source_lang.hash(&mut hasher);
-        target_lang.hash(&mut hasher);
-        provider.hash(&mut hasher);
-        block_text.hash(&mut hasher);
-        format!("blk:{:016x}", hasher.finish())
+        let mut hasher = Sha256::new();
+        hasher.update(b"blk\x00");
+        hasher.update(source_lang.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(target_lang.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(provider.as_bytes());
+        hasher.update(b"\x00");
+        hasher.update(block_text.as_bytes());
+        format!("blk:{:x}", hasher.finalize())
     }
 
     async fn find_by_hash(&self, hash: &str) -> Result<Option<String>, CacheError> {
-        let conn = self.conn.lock().await;
+        let conn = Arc::clone(&self.conn);
+        let hash = hash.to_string();
 
-        let mut stmt = conn
-            .prepare("SELECT translated_text FROM translations WHERE hash = ?1 LIMIT 1")
-            .map_err(|e| CacheError::Database(format!("Failed to prepare select query: {e}")))?;
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| CacheError::Database(format!("Database lock poisoned: {e}")))?;
 
-        let mut rows = stmt
-            .query(params![hash])
-            .map_err(|e| CacheError::Database(format!("Failed to execute query: {e}")))?;
+            let mut stmt = conn
+                .prepare("SELECT translated_text FROM translations WHERE hash = ?1 LIMIT 1")
+                .map_err(|e| {
+                    CacheError::Database(format!("Failed to prepare select query: {e}"))
+                })?;
 
-        if let Some(row) = rows
-            .next()
-            .map_err(|e| CacheError::Database(format!("Failed to fetch row: {e}")))?
-        {
-            let val: rusqlite::types::Value = row
-                .get(0)
-                .map_err(|e| CacheError::Database(format!("Failed to read column: {e}")))?;
+            let mut rows = stmt
+                .query(params![hash])
+                .map_err(|e| CacheError::Database(format!("Failed to execute query: {e}")))?;
 
-            match val {
-                rusqlite::types::Value::Blob(bytes) => {
-                    if bytes.is_empty() {
-                        return Ok(None);
+            if let Some(row) = rows
+                .next()
+                .map_err(|e| CacheError::Database(format!("Failed to fetch row: {e}")))?
+            {
+                let val: rusqlite::types::Value = row
+                    .get(0)
+                    .map_err(|e| CacheError::Database(format!("Failed to read column: {e}")))?;
+
+                match val {
+                    rusqlite::types::Value::Blob(bytes) => {
+                        if bytes.is_empty() {
+                            return Ok(None);
+                        }
+                        const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+                        if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
+                            let decompressed = zstd::decode_all(&bytes[..]).map_err(|e| {
+                                CacheError::Serialization(format!(
+                                    "Failed to decompress zstd cache payload: {e}"
+                                ))
+                            })?;
+                            let text = String::from_utf8(decompressed).map_err(|e| {
+                                CacheError::Serialization(format!(
+                                    "Invalid UTF-8 in decompressed cache payload: {e}"
+                                ))
+                            })?;
+                            if text.trim().is_empty() {
+                                Ok(None)
+                            } else {
+                                Ok(Some(text))
+                            }
+                        } else {
+                            let text = String::from_utf8(bytes).map_err(|e| {
+                                CacheError::Serialization(format!(
+                                    "Invalid UTF-8 in raw cache payload: {e}"
+                                ))
+                            })?;
+                            if text.trim().is_empty() {
+                                Ok(None)
+                            } else {
+                                Ok(Some(text))
+                            }
+                        }
                     }
-                    const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
-                    if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
-                        let decompressed = zstd::decode_all(&bytes[..]).map_err(|e| {
-                            CacheError::Serialization(format!(
-                                "Failed to decompress zstd cache payload: {e}"
-                            ))
-                        })?;
-                        let text = String::from_utf8(decompressed).map_err(|e| {
-                            CacheError::Serialization(format!(
-                                "Invalid UTF-8 in decompressed cache payload: {e}"
-                            ))
-                        })?;
+                    rusqlite::types::Value::Text(text) => {
                         if text.trim().is_empty() {
                             Ok(None)
                         } else {
                             Ok(Some(text))
                         }
-                    } else {
-                        let text = String::from_utf8(bytes).map_err(|e| {
-                            CacheError::Serialization(format!(
-                                "Invalid UTF-8 in raw cache payload: {e}"
-                            ))
-                        })?;
-                        if text.trim().is_empty() {
-                            Ok(None)
-                        } else {
-                            Ok(Some(text))
-                        }
                     }
+                    _ => Ok(None),
                 }
-                rusqlite::types::Value::Text(text) => {
-                    if text.trim().is_empty() {
-                        Ok(None)
-                    } else {
-                        Ok(Some(text))
-                    }
-                }
-                _ => Ok(None),
+            } else {
+                Ok(None)
             }
-        } else {
-            Ok(None)
-        }
+        })
+        .await
+        .map_err(|e| CacheError::Database(format!("Task execution failed: {e}")))?
     }
 
     async fn insert_translation(
@@ -173,27 +201,41 @@ impl SqliteCacheAdapter {
             ));
         }
 
-        let compressed = zstd::encode_all(translated_text.as_bytes(), 3).map_err(|e| {
-            CacheError::Serialization(format!("Failed to compress cache payload: {e}"))
-        })?;
+        let conn = Arc::clone(&self.conn);
+        let hash = hash.to_string();
+        let source_lang = source_lang.to_string();
+        let target_lang = target_lang.to_string();
+        let provider = provider.to_string();
+        let original_text = original_text.to_string();
+        let translated_text = translated_text.to_string();
 
-        let conn = self.conn.lock().await;
+        tokio::task::spawn_blocking(move || {
+            let compressed = zstd::encode_all(translated_text.as_bytes(), 3).map_err(|e| {
+                CacheError::Serialization(format!("Failed to compress cache payload: {e}"))
+            })?;
 
-        conn.execute(
-            "INSERT OR REPLACE INTO translations (hash, source_lang, target_lang, provider, original_text, translated_text)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                hash,
-                source_lang,
-                target_lang,
-                provider,
-                original_text,
-                rusqlite::types::Value::Blob(compressed),
-            ],
-        )
-        .map_err(|e| CacheError::Database(format!("Failed to insert into cache: {e}")))?;
+            let conn = conn
+                .lock()
+                .map_err(|e| CacheError::Database(format!("Database lock poisoned: {e}")))?;
 
-        Ok(())
+            conn.execute(
+                "INSERT OR REPLACE INTO translations (hash, source_lang, target_lang, provider, original_text, translated_text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    hash,
+                    source_lang,
+                    target_lang,
+                    provider,
+                    original_text,
+                    rusqlite::types::Value::Blob(compressed),
+                ],
+            )
+            .map_err(|e| CacheError::Database(format!("Failed to insert into cache: {e}")))?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| CacheError::Database(format!("Task execution failed: {e}")))?
     }
 }
 
@@ -267,66 +309,91 @@ impl TranslationCachePort for SqliteCacheAdapter {
         target_lang: &str,
         metrics: &ExecutionMetrics,
     ) -> Result<(), CacheError> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO execution_metrics_history (
-                provider, target_lang, total_chapters, cache_hits, cache_misses,
-                hit_ratio_pct, avg_latency_ms, total_duration_secs
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                provider,
-                target_lang,
-                metrics.total_chapters as i64,
-                metrics.cache_hits as i64,
-                metrics.cache_misses as i64,
-                metrics.cache_hit_ratio(),
-                metrics.avg_provider_latency().as_secs_f64() * 1000.0,
-                metrics.total_elapsed.as_secs_f64(),
-            ],
-        )
-        .map_err(|e| CacheError::Database(format!("Failed to insert execution metrics: {e}")))?;
+        let conn = Arc::clone(&self.conn);
+        let provider = provider.to_string();
+        let target_lang = target_lang.to_string();
+        let total_chapters = metrics.total_chapters as i64;
+        let cache_hits = metrics.cache_hits as i64;
+        let cache_misses = metrics.cache_misses as i64;
+        let hit_ratio = metrics.cache_hit_ratio();
+        let avg_latency = metrics.avg_provider_latency().as_secs_f64() * 1000.0;
+        let total_duration = metrics.total_elapsed.as_secs_f64();
 
-        Ok(())
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| CacheError::Database(format!("Database lock poisoned: {e}")))?;
+            conn.execute(
+                "INSERT INTO execution_metrics_history (
+                    provider, target_lang, total_chapters, cache_hits, cache_misses,
+                    hit_ratio_pct, avg_latency_ms, total_duration_secs
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    provider,
+                    target_lang,
+                    total_chapters,
+                    cache_hits,
+                    cache_misses,
+                    hit_ratio,
+                    avg_latency,
+                    total_duration,
+                ],
+            )
+            .map_err(|e| {
+                CacheError::Database(format!("Failed to insert execution metrics: {e}"))
+            })?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| CacheError::Database(format!("Task execution failed: {e}")))?
     }
 
     async fn get_metrics_history(
         &self,
         limit: usize,
     ) -> Result<Vec<ExecutionMetricsRecord>, CacheError> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, timestamp, provider, target_lang, total_chapters, cache_hits, cache_misses,
-                        hit_ratio_pct, avg_latency_ms, total_duration_secs
-                 FROM execution_metrics_history
-                 ORDER BY id DESC
-                 LIMIT ?1",
-            )
-            .map_err(|e| CacheError::Database(format!("Failed to prepare select metrics query: {e}")))?;
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let conn = conn
+                .lock()
+                .map_err(|e| CacheError::Database(format!("Database lock poisoned: {e}")))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, timestamp, provider, target_lang, total_chapters, cache_hits, cache_misses,
+                            hit_ratio_pct, avg_latency_ms, total_duration_secs
+                     FROM execution_metrics_history
+                     ORDER BY id DESC
+                     LIMIT ?1",
+                )
+                .map_err(|e| CacheError::Database(format!("Failed to prepare select metrics query: {e}")))?;
 
-        let rows = stmt
-            .query_map(params![limit as i64], |row| {
-                Ok(ExecutionMetricsRecord {
-                    id: row.get(0)?,
-                    timestamp: row.get(1)?,
-                    provider: row.get(2)?,
-                    target_lang: row.get(3)?,
-                    total_chapters: row.get::<_, i64>(4)? as usize,
-                    cache_hits: row.get::<_, i64>(5)? as usize,
-                    cache_misses: row.get::<_, i64>(6)? as usize,
-                    hit_ratio_pct: row.get(7)?,
-                    avg_latency_ms: row.get(8)?,
-                    total_duration_secs: row.get(9)?,
+            let rows = stmt
+                .query_map(params![limit as i64], |row| {
+                    Ok(ExecutionMetricsRecord {
+                        id: row.get(0)?,
+                        timestamp: row.get(1)?,
+                        provider: row.get(2)?,
+                        target_lang: row.get(3)?,
+                        total_chapters: row.get::<_, i64>(4)? as usize,
+                        cache_hits: row.get::<_, i64>(5)? as usize,
+                        cache_misses: row.get::<_, i64>(6)? as usize,
+                        hit_ratio_pct: row.get(7)?,
+                        avg_latency_ms: row.get(8)?,
+                        total_duration_secs: row.get(9)?,
+                    })
                 })
-            })
-            .map_err(|e| CacheError::Database(format!("Failed to execute metrics query: {e}")))?;
+                .map_err(|e| CacheError::Database(format!("Failed to execute metrics query: {e}")))?;
 
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(
-                row.map_err(|e| CacheError::Database(format!("Failed to read metrics row: {e}")))?,
-            );
-        }
-        Ok(results)
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(
+                    row.map_err(|e| CacheError::Database(format!("Failed to read metrics row: {e}")))?,
+                );
+            }
+            Ok(results)
+        })
+        .await
+        .map_err(|e| CacheError::Database(format!("Task execution failed: {e}")))?
     }
 }

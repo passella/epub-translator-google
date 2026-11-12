@@ -12,11 +12,21 @@ impl SourceLocation {
     pub const fn new(file: &'static str, line: u32, column: u32) -> Self {
         Self { file, line, column }
     }
+
+    pub fn display_path(&self) -> &str {
+        if let Some(pos) = self.file.find("src/") {
+            &self.file[pos..]
+        } else if let Some(pos) = self.file.find("tests/") {
+            &self.file[pos..]
+        } else {
+            self.file
+        }
+    }
 }
 
 impl Display for SourceLocation {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+        write!(f, "{}:{}:{}", self.display_path(), self.line, self.column)
     }
 }
 

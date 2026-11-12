@@ -246,3 +246,58 @@ async fn test_zip_epub_write_refuses_empty_chapter() {
 
     let _ = fs::remove_file(out_path);
 }
+
+#[test]
+fn test_find_opf_path_with_attributes_and_whitespace() {
+    let container_xml = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile media-type="application/oebps-package+xml" full-path="EPUB/package.opf" id="item1"/>
+  </rootfiles>
+</container>"#;
+
+    let opf_path = ZipEpubAdapter::find_opf_path_from_container_xml(container_xml).unwrap();
+    assert_eq!(opf_path, "EPUB/package.opf");
+}
+
+#[test]
+fn test_parse_opf_metadata_with_attributes_on_dc_tags() {
+    let opf_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title id="t1" dir="ltr">Advanced Rust Architecture</dc:title>
+    <dc:language id="pub-lang">en-US</dc:language>
+    <dc:creator id="author" opf:role="aut">Jane Doe</dc:creator>
+    <dc:identifier id="isbn" opf:scheme="ISBN">978-0-123456-47-2</dc:identifier>
+    <dc:publisher id="pub">Tech Press</dc:publisher>
+  </metadata>
+</package>"#;
+
+    let metadata = ZipEpubAdapter::parse_opf_metadata(opf_xml);
+    assert_eq!(
+        metadata.title,
+        Some("Advanced Rust Architecture".to_string())
+    );
+    assert_eq!(metadata.language, Some(Language::new("en-US")));
+    assert_eq!(metadata.creator, Some("Jane Doe".to_string()));
+    assert_eq!(metadata.identifier, Some("978-0-123456-47-2".to_string()));
+    assert_eq!(metadata.publisher, Some("Tech Press".to_string()));
+}
+
+#[test]
+fn test_update_xml_tag_preserves_attributes_on_dc_language() {
+    use epub_translator_google::domain::services::update_xml_tag;
+
+    let opf_xml = r#"<package><metadata><dc:language id="pub-language" dir="ltr">en</dc:language></metadata></package>"#;
+    let updated = update_xml_tag(opf_xml, "dc:language", "pt-BR");
+    assert!(updated.contains(r#"<dc:language id="pub-language" dir="ltr">pt-BR</dc:language>"#));
+}
+
+#[test]
+fn test_update_xml_tag_handles_empty_self_closing_tag() {
+    use epub_translator_google::domain::services::update_xml_tag;
+
+    let opf_xml = r#"<package><metadata><dc:language/></metadata></package>"#;
+    let updated = update_xml_tag(opf_xml, "dc:language", "pt-BR");
+    assert!(updated.contains(r#"<dc:language>pt-BR</dc:language>"#));
+}

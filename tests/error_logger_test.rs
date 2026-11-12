@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 #[test]
 fn test_diagnose_root_cause_e2big_argument_list_too_long() {
     let proc = ProcessErrorDetails {
-        command: "/home/passella/.local/bin/agy".to_string(),
+        command: "/usr/local/bin/agy".to_string(),
         args: vec!["--output-format".to_string(), "json".to_string()],
         io_mode: "stdin (streaming pipe)".to_string(),
         exit_code: None,
@@ -93,7 +93,7 @@ fn test_error_log_anti_collision_numbering() {
 #[test]
 fn test_error_report_structure_and_sections() {
     let proc = ProcessErrorDetails {
-        command: "/home/passella/.local/bin/agy".to_string(),
+        command: "/usr/local/bin/agy".to_string(),
         args: vec!["--output-format".to_string(), "json".to_string()],
         io_mode: "stdin (streaming pipe)".to_string(),
         exit_code: Some(1),
@@ -155,7 +155,7 @@ fn test_error_report_structure_and_sections() {
     assert!(content.contains("=== 3. STACK TRACE COMPLETA (BACKTRACE) ==="));
 
     assert!(content.contains("=== 4. SUBPROCESSO E SISTEMA OPERACIONAL ==="));
-    assert!(content.contains("Comando Executado:       /home/passella/.local/bin/agy"));
+    assert!(content.contains("Comando Executado:       /usr/local/bin/agy"));
     assert!(content.contains("Modo de I/O:             stdin (streaming pipe)"));
     assert!(content.contains("Código de Saída (Exit):  1"));
     assert!(content.contains("Código de Erro do SO:    7 (E2BIG / Argument list too long)"));
@@ -340,4 +340,38 @@ fn test_error_report_rate_limited_translation_error() {
     assert!(content.contains("--provider antigravity"));
 
     let _ = fs::remove_file(generated_path);
+}
+
+#[test]
+fn test_log_timestamp_validity_and_iso_formatting() {
+    let ts = LogTimestamp::now();
+    assert!(ts.year >= 2025);
+    assert!((1..=12).contains(&ts.month));
+    assert!((1..=31).contains(&ts.day));
+    assert!(ts.hour <= 23);
+    assert!(ts.minute <= 59);
+    assert!(ts.second <= 59);
+    assert!(ts.local_iso.contains('T'));
+    assert!(ts.utc_iso.ends_with('Z'));
+    assert_eq!(ts.filename_base.len(), 28);
+    assert!(ts.filename_base.starts_with("erro_"));
+}
+
+#[test]
+fn test_source_location_display_path_strips_absolute_machine_paths() {
+    let loc_abs = SourceLocation::new(
+        "/home/developer/dev/projetos/epub-translator-google/src/domain/errors.rs",
+        12,
+        5,
+    );
+    assert_eq!(loc_abs.display_path(), "src/domain/errors.rs");
+    assert_eq!(format!("{loc_abs}"), "src/domain/errors.rs:12:5");
+
+    let loc_tests = SourceLocation::new("/var/build/runner/tests/error_logger_test.rs", 42, 1);
+    assert_eq!(loc_tests.display_path(), "tests/error_logger_test.rs");
+    assert_eq!(format!("{loc_tests}"), "tests/error_logger_test.rs:42:1");
+
+    let loc_rel = SourceLocation::new("src/main.rs", 1, 1);
+    assert_eq!(loc_rel.display_path(), "src/main.rs");
+    assert_eq!(format!("{loc_rel}"), "src/main.rs:1:1");
 }

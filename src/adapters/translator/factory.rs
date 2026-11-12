@@ -11,8 +11,14 @@ use crate::domain::ports::{TranslationCachePort, TranslatorPort};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
-pub type TranslatorConstructor =
-    Arc<dyn Fn(&ProviderConfig) -> Result<Arc<dyn TranslatorPort>, AppError> + Send + Sync>;
+pub type TranslatorConstructor = Arc<
+    dyn Fn(
+            &ProviderConfig,
+            Option<Arc<dyn TranslationCachePort>>,
+        ) -> Result<Arc<dyn TranslatorPort>, AppError>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderMetadata {
@@ -144,22 +150,7 @@ impl ProviderRegistry {
         cache: Option<Arc<dyn TranslationCachePort>>,
     ) -> Result<Arc<dyn TranslatorPort>, AppError> {
         let registration = self.get(config.provider_kind())?;
-        match config {
-            ProviderConfig::Antigravity {
-                model,
-                block_concurrency,
-            } => {
-                let mut adapter = AntigravityTranslatorAdapter::new(model.clone());
-                if let Some(bc) = block_concurrency {
-                    adapter = adapter.with_block_concurrency(*bc);
-                }
-                if let Some(c) = cache {
-                    adapter = adapter.with_cache(c);
-                }
-                Ok(Arc::new(adapter))
-            }
-            _ => (registration.factory)(config),
-        }
+        (registration.factory)(config, cache)
     }
 
     pub fn create_from_parts(
@@ -181,7 +172,7 @@ impl ProviderRegistry {
                 false,
             ),
             Arc::new(AntigravityOptionResolver),
-            Arc::new(|config| match config {
+            Arc::new(|config, cache| match config {
                 ProviderConfig::Antigravity {
                     model,
                     block_concurrency,
@@ -189,6 +180,9 @@ impl ProviderRegistry {
                     let mut adapter = AntigravityTranslatorAdapter::new(model.clone());
                     if let Some(bc) = block_concurrency {
                         adapter = adapter.with_block_concurrency(*bc);
+                    }
+                    if let Some(c) = cache {
+                        adapter = adapter.with_cache(c);
                     }
                     Ok(Arc::new(adapter))
                 }
@@ -206,7 +200,7 @@ impl ProviderRegistry {
                 false,
             ),
             Arc::new(GoogleFreeOptionResolver),
-            Arc::new(|config| match config {
+            Arc::new(|config, _cache| match config {
                 ProviderConfig::GoogleFree => Ok(Arc::new(GoogleFreeTranslatorAdapter::new()?)),
                 _ => Err(AppError::Config(
                     "Invalid config for Google Free provider".to_string(),
@@ -222,7 +216,7 @@ impl ProviderRegistry {
                 true,
             ),
             Arc::new(GoogleCloudOptionResolver),
-            Arc::new(|config| match config {
+            Arc::new(|config, _cache| match config {
                 ProviderConfig::GoogleCloud { api_key } => Ok(Arc::new(
                     GoogleCloudTranslatorAdapter::new(api_key.clone())?,
                 )),
