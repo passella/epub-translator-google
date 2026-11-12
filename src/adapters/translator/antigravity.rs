@@ -159,12 +159,54 @@ impl AntigravityTranslatorAdapter {
     }
 
     pub fn find_binary_path() -> PathBuf {
-        let default_path = PathBuf::from("/home/passella/.local/bin/agy");
-        if default_path.exists() {
-            default_path
-        } else {
-            PathBuf::from("agy")
+        if let Ok(home_var) = std::env::var("HOME") {
+            let local_bin = PathBuf::from(home_var).join(".local/bin/agy");
+            if local_bin.is_file() {
+                return local_bin;
+            }
         }
+        if let Some(home_buf) = dirs::home_dir() {
+            let local_bin = home_buf.join(".local/bin/agy");
+            if local_bin.is_file() {
+                return local_bin;
+            }
+        }
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                let candidate = dir.join("agy");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+        PathBuf::from("agy")
+    }
+
+    pub fn resolve_binary_path(home: Option<&str>) -> PathBuf {
+        Self::resolve_binary_path_with_env(home, None)
+    }
+
+    pub fn resolve_binary_path_with_env(
+        home: Option<&str>,
+        path_env: Option<&std::ffi::OsStr>,
+    ) -> PathBuf {
+        if let Some(home_path) = home {
+            let local_bin = PathBuf::from(home_path).join(".local/bin/agy");
+            if local_bin.is_file() {
+                return local_bin;
+            }
+        }
+
+        if let Some(paths) = path_env {
+            for dir in std::env::split_paths(paths) {
+                let candidate = dir.join("agy");
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+
+        PathBuf::from("agy")
     }
 
     pub fn fetch_available_models(binary_path: &Path) -> Vec<(String, String)> {

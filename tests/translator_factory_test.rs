@@ -84,7 +84,7 @@ fn test_provider_registry_custom_registration_and_creation() {
     let registration = ProviderRegistration::new(
         metadata.clone(),
         Arc::new(MockOptionResolver),
-        Arc::new(|_config| Ok(Arc::new(MockCustomTranslator))),
+        Arc::new(|_config, _cache| Ok(Arc::new(MockCustomTranslator))),
     );
 
     registry.register(registration).unwrap();
@@ -158,4 +158,45 @@ fn test_translator_factory_create_from_parts() {
     .unwrap();
     assert_eq!(adapter.provider_name(), "antigravity");
     assert_eq!(adapter.model_name(), Some("gemini-4-argon-medium"));
+}
+
+#[tokio::test]
+async fn test_provider_registry_create_translator_with_cache_polymorphic_closure() {
+    use epub_translator_google::adapters::cache::SqliteCacheAdapter;
+    use epub_translator_google::domain::ports::TranslationCachePort;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let temp_db =
+        std::env::temp_dir().join(format!("test_factory_cache_{}.db", std::process::id()));
+    let cache: Arc<dyn TranslationCachePort> = Arc::new(SqliteCacheAdapter::new(&temp_db).unwrap());
+
+    static RECEIVED_CACHE: AtomicBool = AtomicBool::new(false);
+
+    let registry = ProviderRegistry::new();
+    let metadata = ProviderMetadata::new(
+        TranslationProviderKind::GoogleFree,
+        "Custom Cache Test",
+        "Test for cache polymorphism",
+        false,
+    );
+    let registration = ProviderRegistration::new(
+        metadata,
+        Arc::new(MockOptionResolver),
+        Arc::new(|_config, cache_opt| {
+            if cache_opt.is_some() {
+                RECEIVED_CACHE.store(true, Ordering::SeqCst);
+            }
+            Ok(Arc::new(MockCustomTranslator))
+        }),
+    );
+
+    registry.register(registration).unwrap();
+
+    let config = ProviderConfig::google_free();
+    let _ = registry
+        .create_translator_with_cache(&config, Some(cache))
+        .unwrap();
+
+    assert!(RECEIVED_CACHE.load(Ordering::SeqCst));
+    let _ = std::fs::remove_file(temp_db);
 }

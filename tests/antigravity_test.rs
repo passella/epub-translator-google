@@ -666,3 +666,75 @@ exit 0
 
     let _ = fs::remove_file(&script_path);
 }
+
+#[test]
+fn test_resolve_binary_path_when_home_is_none() {
+    let resolved = AntigravityTranslatorAdapter::resolve_binary_path(None);
+    assert_eq!(resolved, PathBuf::from("agy"));
+}
+
+#[test]
+fn test_resolve_binary_path_when_binary_does_not_exist() {
+    let temp_home = std::env::temp_dir().join(format!("mock_home_empty_{}", std::process::id()));
+    let resolved = AntigravityTranslatorAdapter::resolve_binary_path(temp_home.to_str());
+    assert_eq!(resolved, PathBuf::from("agy"));
+}
+
+#[test]
+fn test_resolve_binary_path_when_binary_exists_in_home() {
+    let temp_home = std::env::temp_dir().join(format!("mock_home_exists_{}", std::process::id()));
+    let bin_dir = temp_home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let mock_bin = bin_dir.join("agy");
+    fs::write(&mock_bin, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let resolved = AntigravityTranslatorAdapter::resolve_binary_path(temp_home.to_str());
+    assert_eq!(resolved, mock_bin);
+
+    let _ = fs::remove_dir_all(&temp_home);
+}
+
+#[test]
+fn test_find_binary_path_returns_non_empty_path() {
+    let resolved = AntigravityTranslatorAdapter::find_binary_path();
+    assert!(!resolved.as_os_str().is_empty());
+}
+
+#[test]
+fn test_resolve_binary_path_with_env_path_lookup() {
+    let temp_dir = std::env::temp_dir().join(format!("mock_path_dir_{}", std::process::id()));
+    fs::create_dir_all(&temp_dir).unwrap();
+    let mock_bin = temp_dir.join("agy");
+    fs::write(&mock_bin, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let path_os = std::ffi::OsString::from(temp_dir.to_str().unwrap());
+    let resolved =
+        AntigravityTranslatorAdapter::resolve_binary_path_with_env(None, Some(path_os.as_os_str()));
+    assert_eq!(resolved, mock_bin);
+
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_resolve_binary_path_with_env_home_precedence_over_path() {
+    let temp_home = std::env::temp_dir().join(format!("mock_home_prec_{}", std::process::id()));
+    let bin_dir = temp_home.join(".local/bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let mock_home_bin = bin_dir.join("agy");
+    fs::write(&mock_home_bin, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let temp_path = std::env::temp_dir().join(format!("mock_path_prec_{}", std::process::id()));
+    fs::create_dir_all(&temp_path).unwrap();
+    let mock_path_bin = temp_path.join("agy");
+    fs::write(&mock_path_bin, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let path_os = std::ffi::OsString::from(temp_path.to_str().unwrap());
+    let resolved = AntigravityTranslatorAdapter::resolve_binary_path_with_env(
+        temp_home.to_str(),
+        Some(path_os.as_os_str()),
+    );
+    assert_eq!(resolved, mock_home_bin);
+
+    let _ = fs::remove_dir_all(&temp_home);
+    let _ = fs::remove_dir_all(&temp_path);
+}

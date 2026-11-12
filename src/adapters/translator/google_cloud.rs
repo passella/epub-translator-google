@@ -111,29 +111,29 @@ impl TranslatorPort for GoogleCloudTranslatorAdapter {
             format: "html",
         };
 
-        let url = format!(
-            "https://translation.googleapis.com/language/translate/v2?key={}",
-            self.api_key
-        );
+        let url = "https://translation.googleapis.com/language/translate/v2";
 
         let request = self
             .client
-            .post(&url)
+            .post(url)
+            .header("X-goog-api-key", &self.api_key)
             .json(&request_body)
             .build()
             .map_err(|e| TranslationError::Http(format!("Failed to build HTTP request: {e}")))?;
 
         let request_method = request.method().to_string();
-        let request_url =
-            "https://translation.googleapis.com/language/translate/v2?key=[REDACTED]".to_string();
+        let request_url = url.to_string();
         let request_headers: Vec<(String, String)> = request
             .headers()
             .iter()
             .map(|(name, val)| {
-                (
-                    name.as_str().to_string(),
-                    val.to_str().unwrap_or("[non-utf8 header]").to_string(),
-                )
+                let name_str = name.as_str().to_string();
+                let val_str = if name_str.eq_ignore_ascii_case("x-goog-api-key") {
+                    "[REDACTED]".to_string()
+                } else {
+                    val.to_str().unwrap_or("[non-utf8 header]").to_string()
+                };
+                (name_str, val_str)
             })
             .collect();
         let request_body_str = request

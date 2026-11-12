@@ -1,29 +1,10 @@
 use crate::domain::errors::{AppError, HttpErrorDetails, ProcessErrorDetails, TranslationError};
+use chrono::{Datelike, Local, Timelike, Utc};
 use std::backtrace::Backtrace;
 use std::error::Error;
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-#[repr(C)]
-struct Tm {
-    tm_sec: std::ffi::c_int,
-    tm_min: std::ffi::c_int,
-    tm_hour: std::ffi::c_int,
-    tm_mday: std::ffi::c_int,
-    tm_mon: std::ffi::c_int,
-    tm_year: std::ffi::c_int,
-    tm_wday: std::ffi::c_int,
-    tm_yday: std::ffi::c_int,
-    tm_isdst: std::ffi::c_int,
-    tm_gmtoff: std::ffi::c_long,
-    tm_zone: *const std::ffi::c_char,
-}
-
-unsafe extern "C" {
-    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
-    fn gmtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionContext {
@@ -51,51 +32,19 @@ pub struct LogTimestamp {
 
 impl LogTimestamp {
     pub fn now() -> Self {
-        let now = std::time::SystemTime::now();
-        let duration = now
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = duration.as_secs() as i64;
-        let nanos = duration.subsec_nanos();
+        let local_dt = Local::now();
+        let utc_dt = Utc::now();
 
-        let mut tm_local = std::mem::MaybeUninit::<Tm>::zeroed();
-        let local = unsafe {
-            localtime_r(&secs, tm_local.as_mut_ptr());
-            tm_local.assume_init()
-        };
+        let year = local_dt.year();
+        let month = local_dt.month();
+        let day = local_dt.day();
+        let hour = local_dt.hour();
+        let minute = local_dt.minute();
+        let second = local_dt.second();
+        let nanos = local_dt.nanosecond();
 
-        let year = local.tm_year + 1900;
-        let month = (local.tm_mon + 1) as u32;
-        let day = local.tm_mday as u32;
-        let hour = local.tm_hour as u32;
-        let minute = local.tm_min as u32;
-        let second = local.tm_sec as u32;
-        let gmtoff = local.tm_gmtoff;
-
-        let offset_sign = if gmtoff >= 0 { '+' } else { '-' };
-        let abs_offset = gmtoff.unsigned_abs();
-        let offset_h = abs_offset / 3600;
-        let offset_m = (abs_offset % 3600) / 60;
-
-        let local_iso = format!(
-            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}{offset_sign}{offset_h:02}:{offset_m:02}"
-        );
-
-        let mut tm_utc = std::mem::MaybeUninit::<Tm>::zeroed();
-        let utc = unsafe {
-            gmtime_r(&secs, tm_utc.as_mut_ptr());
-            tm_utc.assume_init()
-        };
-        let utc_year = utc.tm_year + 1900;
-        let utc_month = (utc.tm_mon + 1) as u32;
-        let utc_day = utc.tm_mday as u32;
-        let utc_hour = utc.tm_hour as u32;
-        let utc_minute = utc.tm_min as u32;
-        let utc_second = utc.tm_sec as u32;
-
-        let utc_iso = format!(
-            "{utc_year:04}-{utc_month:02}-{utc_day:02}T{utc_hour:02}:{utc_minute:02}:{utc_second:02}.{nanos:09}Z"
-        );
+        let local_iso = local_dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, false);
+        let utc_iso = utc_dt.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
 
         let filename_base =
             format!("erro_{year:04}{month:02}{day:02}{hour:02}{minute:02}{second:02}{nanos:09}");
