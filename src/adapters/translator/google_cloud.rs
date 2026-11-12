@@ -1,5 +1,6 @@
+use crate::adapters::translator::http_util::{HttpRequestSnapshot, extract_headers};
 use crate::domain::entities::{Language, TranslationResult};
-use crate::domain::errors::{HttpErrorDetails, TranslationError};
+use crate::domain::errors::TranslationError;
 use crate::domain::ports::TranslatorPort;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -121,53 +122,18 @@ impl TranslatorPort for GoogleCloudTranslatorAdapter {
             .build()
             .map_err(|e| TranslationError::Http(format!("Failed to build HTTP request: {e}")))?;
 
-        let request_method = request.method().to_string();
-        let request_url = url.to_string();
-        let request_headers: Vec<(String, String)> = request
-            .headers()
-            .iter()
-            .map(|(name, val)| {
-                let name_str = name.as_str().to_string();
-                let val_str = if name_str.eq_ignore_ascii_case("x-goog-api-key") {
-                    "[REDACTED]".to_string()
-                } else {
-                    val.to_str().unwrap_or("[non-utf8 header]").to_string()
-                };
-                (name_str, val_str)
-            })
-            .collect();
-        let request_body_str = request
-            .body()
-            .and_then(|b| b.as_bytes())
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-            .unwrap_or_default();
+        let snapshot = HttpRequestSnapshot::from_request(&request, &["x-goog-api-key"]);
 
         let response = self.client.execute(request).await.map_err(|e| {
-            TranslationError::HttpDetailed(Box::new(HttpErrorDetails {
-                url: request_url.clone(),
-                method: request_method.clone(),
-                request_headers: request_headers.clone(),
-                request_body: request_body_str.clone(),
-                status_code: 0,
-                response_headers: Vec::new(),
-                response_body: String::new(),
-                message: format!("Google Cloud HTTP network failure: {e}"),
-            }))
+            TranslationError::HttpDetailed(Box::new(
+                snapshot
+                    .to_network_error_details(format!("Google Cloud HTTP network failure: {e}")),
+            ))
         })?;
 
         let status = response.status();
         let status_code = status.as_u16();
-
-        let response_headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(name, val)| {
-                (
-                    name.as_str().to_string(),
-                    val.to_str().unwrap_or("[non-utf8 header]").to_string(),
-                )
-            })
-            .collect();
+        let response_headers = extract_headers(response.headers());
 
         let bytes = response
             .bytes()
@@ -180,16 +146,12 @@ impl TranslatorPort for GoogleCloudTranslatorAdapter {
                 .map(|err_resp| err_resp.error.message)
                 .unwrap_or_else(|_| raw_text.clone());
 
-            let error_details = Box::new(HttpErrorDetails {
-                url: request_url,
-                method: request_method,
-                request_headers,
-                request_body: request_body_str,
+            let error_details = Box::new(snapshot.to_http_error_details(
                 status_code,
                 response_headers,
-                response_body: raw_text,
-                message: format!("Google Cloud API error {status}: {parsed_message}"),
-            });
+                raw_text,
+                format!("Google Cloud API error {status}: {parsed_message}"),
+            ));
 
             if status_code == 429 {
                 return Err(TranslationError::RateLimited(format!(

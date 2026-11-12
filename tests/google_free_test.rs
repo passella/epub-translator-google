@@ -138,3 +138,78 @@ fn test_unmask_html_orphan_detection_positive_missing_or_corrupted_tag() {
     assert!(orphans.contains(&"⟦1⟧".to_string()));
     assert!(orphans.contains(&"⟦ 2 ⟧".to_string()));
 }
+
+#[test]
+fn test_normalize_placeholders_variations_and_non_placeholders() {
+    let input_double_brackets = "Texto [[0]] e [[ 1 ]] e [[2 ]]";
+    assert_eq!(
+        GoogleFreeTranslatorAdapter::normalize_placeholders(input_double_brackets),
+        "Texto ⟦0⟧ e ⟦1⟧ e ⟦2⟧"
+    );
+
+    let input_spaced_brackets = "Texto [ 0 ] e [ 1] e [2 ]";
+    assert_eq!(
+        GoogleFreeTranslatorAdapter::normalize_placeholders(input_spaced_brackets),
+        "Texto ⟦0⟧ e ⟦1⟧ e ⟦2⟧"
+    );
+
+    let input_single_brackets = "Texto [0] e [1] e [42]";
+    assert_eq!(
+        GoogleFreeTranslatorAdapter::normalize_placeholders(input_single_brackets),
+        "Texto ⟦0⟧ e ⟦1⟧ e ⟦42⟧"
+    );
+
+    let input_spaced_math_brackets = "Texto ⟦ 0 ⟧ e ⟦ 1⟧ e ⟦2 ⟧";
+    assert_eq!(
+        GoogleFreeTranslatorAdapter::normalize_placeholders(input_spaced_math_brackets),
+        "Texto ⟦0⟧ e ⟦1⟧ e ⟦2⟧"
+    );
+
+    let input_mixed = "Prefácio [[0]] título [ 1 ] corpo [2] notas ⟦ 3 ⟧ fim";
+    assert_eq!(
+        GoogleFreeTranslatorAdapter::normalize_placeholders(input_mixed),
+        "Prefácio ⟦0⟧ título ⟦1⟧ corpo ⟦2⟧ notas ⟦3⟧ fim"
+    );
+
+    let input_non_placeholders = "Link [nota 1] e [teste] e [[wiki]] e [] e [-1]";
+    assert_eq!(
+        GoogleFreeTranslatorAdapter::normalize_placeholders(input_non_placeholders),
+        "Link [nota 1] e [teste] e [[wiki]] e [] e [-1]"
+    );
+}
+
+#[test]
+fn test_unmask_html_with_corrupted_brackets_normalization_cycle() {
+    let tags = vec![
+        "<h1>".to_string(),
+        "</h1>".to_string(),
+        "<p>".to_string(),
+        "</p>".to_string(),
+    ];
+    let corrupted_translated = "[[0]]Capítulo 1[[1]]\n[ 2 ]Texto do capítulo.[3]";
+    let normalized = GoogleFreeTranslatorAdapter::normalize_placeholders(corrupted_translated);
+    let unmasked = GoogleFreeTranslatorAdapter::unmask_html(&normalized, &tags);
+
+    assert_eq!(unmasked, "<h1>Capítulo 1</h1>\n<p>Texto do capítulo.</p>");
+    assert!(!GoogleFreeTranslatorAdapter::has_orphan_placeholders(
+        &unmasked
+    ));
+    assert!(GoogleFreeTranslatorAdapter::find_orphan_placeholders(&unmasked).is_empty());
+}
+
+#[test]
+fn test_unmask_html_with_orphan_corrupted_brackets_detected() {
+    let tags = vec!["<h1>".to_string(), "</h1>".to_string()];
+    let corrupted_with_extra = "[[0]]Capítulo 1[[1]] com resíduo [[99]] e [ 100 ]";
+    let normalized = GoogleFreeTranslatorAdapter::normalize_placeholders(corrupted_with_extra);
+    let unmasked = GoogleFreeTranslatorAdapter::unmask_html(&normalized, &tags);
+    let normalized_unmasked = GoogleFreeTranslatorAdapter::normalize_placeholders(&unmasked);
+
+    assert!(GoogleFreeTranslatorAdapter::has_orphan_placeholders(
+        &normalized_unmasked
+    ));
+    let orphans = GoogleFreeTranslatorAdapter::find_orphan_placeholders(&normalized_unmasked);
+    assert_eq!(orphans.len(), 2);
+    assert!(orphans.contains(&"⟦99⟧".to_string()));
+    assert!(orphans.contains(&"⟦100⟧".to_string()));
+}

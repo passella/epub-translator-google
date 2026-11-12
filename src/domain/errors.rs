@@ -105,7 +105,6 @@ impl std::error::Error for ChapterTranslationError {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum EpubError {
     #[error("EPUB I/O error: {0}")]
@@ -163,7 +162,6 @@ pub enum TranslationError {
     XmlValidation(String),
 }
 
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum CacheError {
     #[error("Database error: {0}")]

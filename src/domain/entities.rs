@@ -176,15 +176,6 @@ impl ProviderConfig {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TranslationRequest {
-    pub text: String,
-    pub source_lang: Language,
-    pub target_lang: Language,
-    pub is_html: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TranslationResult {
     pub translated_text: String,

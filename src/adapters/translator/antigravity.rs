@@ -4,17 +4,23 @@ use crate::domain::ports::{ModelDiscoveryPort, TranslationCachePort, TranslatorP
 use crate::domain::services::{XhtmlPartitioner, XhtmlValidator};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::{LazyLock, RwLock};
+use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 
+type ModelCacheEntry = (Instant, Vec<(String, String)>);
+type ModelCacheMap = HashMap<PathBuf, ModelCacheEntry>;
+
 static JITTER_SEED: AtomicU64 = AtomicU64::new(123456789);
+static MODEL_CACHE: LazyLock<RwLock<ModelCacheMap>> = LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetryConfig {
@@ -209,15 +215,28 @@ impl AntigravityTranslatorAdapter {
         PathBuf::from("agy")
     }
 
+    pub fn clear_model_cache() {
+        if let Ok(mut cache) = MODEL_CACHE.write() {
+            cache.clear();
+        }
+    }
+
     pub async fn fetch_available_models(binary_path: &Path) -> Vec<(String, String)> {
-        let output = match tokio::process::Command::new(binary_path)
+        if let Ok(cache) = MODEL_CACHE.read()
+            && let Some((timestamp, cached_models)) = cache.get(binary_path)
+            && timestamp.elapsed() < Duration::from_secs(60)
+        {
+            return cached_models.clone();
+        }
+
+        let cmd_future = Command::new(binary_path)
             .arg("models")
             .stderr(std::process::Stdio::null())
-            .output()
-            .await
-        {
-            Ok(out) => out,
-            Err(_) => return Vec::new(),
+            .output();
+
+        let output = match tokio::time::timeout(Duration::from_secs(5), cmd_future).await {
+            Ok(Ok(out)) => out,
+            _ => return Vec::new(),
         };
 
         if !output.status.success() {
@@ -243,6 +262,13 @@ impl AntigravityTranslatorAdapter {
             };
             models.push((id, desc));
         }
+
+        if !models.is_empty()
+            && let Ok(mut cache) = MODEL_CACHE.write()
+        {
+            cache.insert(binary_path.to_path_buf(), (Instant::now(), models.clone()));
+        }
+
         models
     }
 
@@ -438,8 +464,8 @@ impl AntigravityTranslatorAdapter {
         let max_attempts = self.retry_config.max_attempts.max(1);
 
         for attempt in 0..max_attempts {
-            match self.execute_single_attempt(&prompt, &cmd_args).await {
-                Ok(result) => return Ok(result),
+            return match self.execute_single_attempt(&prompt, &cmd_args).await {
+                Ok(result) => Ok(result),
                 Err((err, is_transient)) => {
                     let has_next_attempt = attempt + 1 < max_attempts;
                     if is_transient && has_next_attempt {
@@ -452,9 +478,9 @@ impl AntigravityTranslatorAdapter {
                         sleep(delay).await;
                         continue;
                     }
-                    return Err(err);
+                    Err(err)
                 }
-            }
+            };
         }
 
         Err(TranslationError::Process(
@@ -645,12 +671,7 @@ impl TranslatorPort for AntigravityTranslatorAdapter {
         source_lang: &Language,
         target_lang: &Language,
     ) -> Result<Vec<TranslationResult>, TranslationError> {
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            let res = self.translate_html(text, source_lang, target_lang).await?;
-            results.push(res);
-        }
-        Ok(results)
+        super::common::translate_batch_sequential(self, texts, source_lang, target_lang).await
     }
 
     fn provider_name(&self) -> &'static str {

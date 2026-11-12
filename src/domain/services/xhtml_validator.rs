@@ -1,11 +1,7 @@
+use super::xhtml_common::{extract_tag_name, is_valid_xml_entity, is_void_tag};
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use thiserror::Error;
-
-const VOID_TAGS: &[&str] = &[
-    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
-    "track", "wbr",
-];
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum XhtmlValidationError {
@@ -43,11 +39,11 @@ impl XhtmlValidator {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let name = e.name().as_ref().to_string();
                     tag_stack.push(name);
                 }
                 Ok(Event::End(e)) => {
-                    let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                    let name = e.name().as_ref().to_string();
                     if let Some(top) = tag_stack.pop() {
                         if !top.eq_ignore_ascii_case(&name) {
                             return Err(XhtmlValidationError::TagMismatch {
@@ -61,11 +57,11 @@ impl XhtmlValidator {
                 }
                 Ok(Event::Empty(_)) => {}
                 Ok(Event::Text(t)) => {
-                    let text = String::from_utf8_lossy(t.as_ref());
+                    let text = t.as_ref();
                     let mut idx = 0;
                     while let Some(amp_pos) = text[idx..].find('&') {
                         let actual_pos = idx + amp_pos;
-                        if !Self::is_valid_xml_entity(&text[actual_pos..]) {
+                        if !is_valid_xml_entity(&text[actual_pos..]) {
                             return Err(XhtmlValidationError::MalformedXml(
                                 "Unescaped '&' found in XML text content".to_string(),
                             ));
@@ -78,7 +74,8 @@ impl XhtmlValidator {
                     | Event::CData(_)
                     | Event::Decl(_)
                     | Event::DocType(_)
-                    | Event::PI(_),
+                    | Event::PI(_)
+                    | Event::GeneralRef(_),
                 ) => {}
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(XhtmlValidationError::MalformedXml(e.to_string())),
@@ -277,31 +274,6 @@ impl XhtmlValidator {
         out
     }
 
-    fn is_valid_xml_entity(slice: &str) -> bool {
-        if !slice.starts_with('&') {
-            return false;
-        }
-        let rest = &slice[1..];
-        let Some(semicolon_pos) = rest.find(';') else {
-            return false;
-        };
-        if semicolon_pos == 0 || semicolon_pos > 10 {
-            return false;
-        }
-        let entity_body = &rest[..semicolon_pos];
-        if let Some(dec) = entity_body.strip_prefix('#') {
-            if let Some(hex) = dec.strip_prefix('x').or_else(|| dec.strip_prefix('X')) {
-                !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit())
-            } else {
-                !dec.is_empty() && dec.chars().all(|c| c.is_ascii_digit())
-            }
-        } else {
-            entity_body
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        }
-    }
-
     fn heal_naked_ampersands(xml: &str) -> String {
         let mut out = String::with_capacity(xml.len() + 16);
         let mut i = 0;
@@ -320,7 +292,7 @@ impl XhtmlValidator {
                 out.push('>');
                 i += ch_len;
             } else if ch == '&' && !in_tag {
-                if Self::is_valid_xml_entity(&xml[i..]) {
+                if is_valid_xml_entity(&xml[i..]) {
                     out.push('&');
                 } else {
                     out.push_str("&amp;");
@@ -333,31 +305,6 @@ impl XhtmlValidator {
         }
 
         out
-    }
-
-    fn extract_tag_name(slice: &str) -> String {
-        let trimmed = slice.trim_start();
-        let without_open = if let Some(stripped) = trimmed.strip_prefix("</") {
-            stripped
-        } else if let Some(stripped) = trimmed.strip_prefix('<') {
-            stripped
-        } else {
-            return String::new();
-        };
-
-        let mut name = String::new();
-        for ch in without_open.chars() {
-            if ch.is_ascii_alphanumeric() || ch == ':' || ch == '_' || ch == '-' {
-                name.push(ch);
-            } else {
-                break;
-            }
-        }
-        name.to_ascii_lowercase()
-    }
-
-    fn is_void_tag(name: &str) -> bool {
-        VOID_TAGS.iter().any(|v| v.eq_ignore_ascii_case(name))
     }
 
     fn heal_tags(xml: &str) -> String {
@@ -423,7 +370,7 @@ impl XhtmlValidator {
                     Some(idx) => next_open + idx + 1,
                     None => xml.len(),
                 };
-                let tag_name = Self::extract_tag_name(&xml[next_open..end]);
+                let tag_name = extract_tag_name(&xml[next_open..end]);
 
                 if tag_name.is_empty() {
                     pos = end;
@@ -458,7 +405,7 @@ impl XhtmlValidator {
             };
 
             let tag_str = &xml[next_open..end];
-            let tag_name = Self::extract_tag_name(tag_str);
+            let tag_name = extract_tag_name(tag_str);
 
             if tag_name.is_empty() {
                 out.push_str(tag_str);
@@ -470,7 +417,7 @@ impl XhtmlValidator {
 
             if is_self_closing {
                 out.push_str(tag_str);
-            } else if Self::is_void_tag(&tag_name) {
+            } else if is_void_tag(&tag_name) {
                 let without_gt = tag_str.strip_suffix('>').unwrap_or(tag_str).trim_end();
                 out.push_str(without_gt);
                 out.push_str(" />");

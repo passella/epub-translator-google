@@ -154,13 +154,7 @@ impl CliRunner {
         }
 
         let mut out = String::new();
-        for (i, h) in headers.iter().enumerate() {
-            if i > 0 {
-                out.push_str(" | ");
-            }
-            out.push_str(&format!("{:width$}", h, width = widths[i]));
-        }
-        out.push('\n');
+        Self::append_table_row(&mut out, &headers, &widths);
 
         for (i, w) in widths.iter().enumerate() {
             if i > 0 {
@@ -171,16 +165,20 @@ impl CliRunner {
         out.push('\n');
 
         for row in &rows {
-            for (i, cell) in row.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(" | ");
-                }
-                out.push_str(&format!("{:width$}", cell, width = widths[i]));
-            }
-            out.push('\n');
+            Self::append_table_row(&mut out, row, &widths);
         }
 
         out.trim_end().to_string()
+    }
+
+    fn append_table_row(out: &mut String, cells: &[impl AsRef<str>], widths: &[usize]) {
+        for (i, cell) in cells.iter().enumerate() {
+            if i > 0 {
+                out.push_str(" | ");
+            }
+            out.push_str(&format!("{:width$}", cell.as_ref(), width = widths[i]));
+        }
+        out.push('\n');
     }
 
     fn handle_error(err: &AppError, ctx: &ExecutionContext) {
@@ -267,7 +265,8 @@ impl CliRunner {
         ctx.provider = Some(provider_kind.as_str().to_string());
 
         let provider_config =
-            ProviderConfigResolver::resolve_interactive(provider_kind, &args, is_headless).await?;
+            ProviderConfigResolver::resolve_interactive(provider_kind, &args, is_headless, None)
+                .await?;
         ctx.model = provider_config.model().map(ToString::to_string);
 
         let output_path = if is_headless {

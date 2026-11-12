@@ -6,16 +6,18 @@ license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13.5", features = ["json", "stream", "form"] }
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
-quick-xml = "0.37"
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+quick-xml = "0.42.0"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
-inquire = "0.7"
-indicatif = "0.17"
+inquire = "0.9.4"
+indicatif = "0.18.6"
 zstd = "0.14.3"
-dirs = "6.0"
+dirs = "7.0.0"
+sha2 = "0.11.1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

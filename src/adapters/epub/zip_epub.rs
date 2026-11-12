@@ -28,19 +28,20 @@ impl ZipEpubAdapter {
             match reader.read_event() {
                 Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
                     let local_name = e.local_name();
-                    if local_name.as_ref() == b"rootfile" {
+                    if local_name.as_ref() == "rootfile" {
                         for attr in e.attributes() {
                             let attr = attr.map_err(|err| {
                                 EpubError::Xml(format!(
                                     "Failed to parse container.xml attribute: {err}"
                                 ))
                             })?;
-                            if attr.key.as_ref() == b"full-path" {
-                                let val = attr.unescape_value().map_err(|err| {
-                                    EpubError::Xml(format!(
-                                        "Failed to unescape full-path attribute: {err}"
-                                    ))
-                                })?;
+                            if attr.key.as_ref() == "full-path" {
+                                let val =
+                                    quick_xml::escape::unescape(&attr.value).map_err(|err| {
+                                        EpubError::Xml(format!(
+                                            "Failed to unescape full-path attribute: {err}"
+                                        ))
+                                    })?;
                                 if !val.is_empty() {
                                     return Ok(val.into_owned());
                                 }
@@ -88,7 +89,7 @@ impl ZipEpubAdapter {
             let mut file = archive
                 .by_index(i)
                 .map_err(|e| EpubError::Zip(format!("Failed to read zip entry {i}: {e}")))?;
-            if file.name() == "META-INF/container.xml" {
+            if file.name().ok().as_deref() == Some("META-INF/container.xml") {
                 let mut content = String::new();
                 file.read_to_string(&mut content).map_err(EpubError::Io)?;
                 container_xml_content = Some(content);
@@ -107,7 +108,10 @@ impl ZipEpubAdapter {
             let mut file = archive
                 .by_index(i)
                 .map_err(|e| EpubError::Zip(format!("Failed to access zip entry {i}: {e}")))?;
-            let file_name = file.name().to_string();
+            let file_name = file
+                .name()
+                .map_err(|e| EpubError::Zip(format!("Failed to read entry name {i}: {e}")))?
+                .to_string();
 
             if file.is_dir() || file_name == "mimetype" {
                 continue;
@@ -256,7 +260,10 @@ impl ZipEpubAdapter {
 
         match archive.by_index(0) {
             Ok(mut first_entry) => {
-                let name = first_entry.name().to_string();
+                let name = first_entry
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
                 let comp_method = first_entry.compression();
                 let size = first_entry.size();
                 let mut data = Vec::new();
@@ -287,7 +294,7 @@ impl ZipEpubAdapter {
         let mut container_xml_content = None;
         for i in 0..archive.len() {
             if let Ok(mut entry) = archive.by_index(i)
-                && entry.name() == "META-INF/container.xml"
+                && entry.name().ok().as_deref() == Some("META-INF/container.xml")
             {
                 let mut content = String::new();
                 if entry.read_to_string(&mut content).is_ok() {
@@ -326,7 +333,7 @@ impl ZipEpubAdapter {
             let mut found_opf = false;
             for i in 0..archive.len() {
                 if let Ok(mut entry) = archive.by_index(i)
-                    && entry.name() == expected_opf
+                    && entry.name().ok().as_deref() == Some(expected_opf.as_str())
                 {
                     found_opf = true;
                     let mut content = String::new();
@@ -358,7 +365,10 @@ impl ZipEpubAdapter {
             let Ok(mut entry) = archive.by_index(i) else {
                 continue;
             };
-            let name = entry.name().to_string();
+            let Ok(name) = entry.name() else {
+                continue;
+            };
+            let name = name.to_string();
             let lower = name.to_lowercase();
             let is_xhtml =
                 lower.ends_with(".xhtml") || lower.ends_with(".html") || lower.ends_with(".htm");
@@ -409,13 +419,12 @@ impl Default for ZipEpubAdapter {
 }
 
 pub fn extract_tag_content(xml: &str, tag_name: &str) -> Option<String> {
-    let target_bytes = tag_name.as_bytes();
+    let target = tag_name;
     let target_local = if let Some(pos) = tag_name.find(':') {
         &tag_name[pos + 1..]
     } else {
         tag_name
-    }
-    .as_bytes();
+    };
 
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -428,25 +437,23 @@ pub fn extract_tag_content(xml: &str, tag_name: &str) -> Option<String> {
             Ok(Event::Start(ref e)) => {
                 let name = e.name();
                 let local = e.local_name();
-                if name.as_ref() == target_bytes || local.as_ref() == target_local {
+                if name.as_ref() == target || local.as_ref() == target_local {
                     inside_tag = true;
                     collected_text.clear();
                 }
             }
             Ok(Event::Text(ref e)) if inside_tag => {
-                if let Ok(text) = e.unescape() {
+                if let Ok(text) = quick_xml::escape::unescape(e.as_ref()) {
                     collected_text.push_str(&text);
                 }
             }
             Ok(Event::CData(ref e)) if inside_tag => {
-                if let Ok(text) = std::str::from_utf8(e.as_ref()) {
-                    collected_text.push_str(text);
-                }
+                collected_text.push_str(e.as_ref());
             }
             Ok(Event::End(ref e)) => {
                 let name = e.name();
                 let local = e.local_name();
-                if inside_tag && (name.as_ref() == target_bytes || local.as_ref() == target_local) {
+                if inside_tag && (name.as_ref() == target || local.as_ref() == target_local) {
                     let trimmed = collected_text.trim();
                     if !trimmed.is_empty() {
                         return Some(trimmed.to_string());

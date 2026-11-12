@@ -366,13 +366,12 @@ pub fn update_xml_tag(xml: &str, tag_name: &str, new_value: &str) -> String {
     use quick_xml::writer::Writer;
     use std::io::Cursor;
 
-    let target_bytes = tag_name.as_bytes();
+    let target = tag_name;
     let target_local = if let Some(pos) = tag_name.find(':') {
         &tag_name[pos + 1..]
     } else {
         tag_name
-    }
-    .as_bytes();
+    };
 
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::with_capacity(xml.len() + new_value.len())));
@@ -384,7 +383,7 @@ pub fn update_xml_tag(xml: &str, tag_name: &str, new_value: &str) -> String {
             Ok(Event::Start(e)) => {
                 let name = e.name();
                 let local = e.local_name();
-                if !replaced && (name.as_ref() == target_bytes || local.as_ref() == target_local) {
+                if !replaced && (name.as_ref() == target || local.as_ref() == target_local) {
                     inside_target = true;
                     let _ = writer.write_event(Event::Start(e));
                     let _ = writer.write_event(Event::Text(BytesText::new(new_value)));
@@ -395,9 +394,7 @@ pub fn update_xml_tag(xml: &str, tag_name: &str, new_value: &str) -> String {
             Ok(Event::End(e)) => {
                 let name = e.name();
                 let local = e.local_name();
-                if inside_target
-                    && (name.as_ref() == target_bytes || local.as_ref() == target_local)
-                {
+                if inside_target && (name.as_ref() == target || local.as_ref() == target_local) {
                     inside_target = false;
                     replaced = true;
                     let _ = writer.write_event(Event::End(e));
@@ -408,13 +405,11 @@ pub fn update_xml_tag(xml: &str, tag_name: &str, new_value: &str) -> String {
             Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let local = e.local_name();
-                if !replaced && (name.as_ref() == target_bytes || local.as_ref() == target_local) {
-                    let end_bytes = e.name().as_ref().to_vec();
+                if !replaced && (name.as_ref() == target || local.as_ref() == target_local) {
+                    let end_tag = e.name().as_ref().to_string();
                     let _ = writer.write_event(Event::Start(e));
                     let _ = writer.write_event(Event::Text(BytesText::new(new_value)));
-                    let _ = writer.write_event(Event::End(BytesEnd::new(
-                        std::str::from_utf8(&end_bytes).unwrap_or(tag_name),
-                    )));
+                    let _ = writer.write_event(Event::End(BytesEnd::new(&end_tag)));
                     replaced = true;
                 } else {
                     let _ = writer.write_event(Event::Empty(e));

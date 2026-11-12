@@ -86,7 +86,12 @@ impl SqliteCacheAdapter {
         hasher.update(provider.as_bytes());
         hasher.update(b"\x00");
         hasher.update(text.as_bytes());
-        format!("{:x}", hasher.finalize())
+        let hash = hasher.finalize();
+        let mut out = String::with_capacity(hash.len() * 2);
+        for &b in hash.as_slice() {
+            let _ = std::fmt::write(&mut out, format_args!("{:02x}", b));
+        }
+        out
     }
 
     pub fn calculate_block_hash(
@@ -104,7 +109,13 @@ impl SqliteCacheAdapter {
         hasher.update(provider.as_bytes());
         hasher.update(b"\x00");
         hasher.update(block_text.as_bytes());
-        format!("blk:{:x}", hasher.finalize())
+        let hash = hasher.finalize();
+        let mut out = String::with_capacity(4 + hash.len() * 2);
+        out.push_str("blk:");
+        for &b in hash.as_slice() {
+            let _ = std::fmt::write(&mut out, format_args!("{:02x}", b));
+        }
+        out
     }
 
     async fn find_by_hash(&self, hash: &str) -> Result<Option<String>, CacheError> {

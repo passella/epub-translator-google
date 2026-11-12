@@ -52,26 +52,81 @@ async fn test_fetch_available_models_with_non_existent_binary() {
 }
 
 #[tokio::test]
+async fn test_fetch_available_models_caching_and_invalidation() {
+    AntigravityTranslatorAdapter::clear_model_cache();
+
+    let counter_file = unique_temp_file("agy_models_cache_test");
+    if counter_file.exists() {
+        let _ = fs::remove_file(&counter_file);
+    }
+    let script_content = format!(
+        "#!/bin/sh\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\necho \"gemini-4-flash Flash Model\"\necho \"gemini-4-pro Pro Model\"\nexit 0\n",
+        counter_file.display(),
+        counter_file.display(),
+        counter_file.display()
+    );
+    let script_path = create_mock_script(&script_content, "mock_agy_models_cache.sh");
+
+    let models_first = AntigravityTranslatorAdapter::fetch_available_models(&script_path).await;
+    assert_eq!(models_first.len(), 2);
+    assert_eq!(models_first[0].0, "gemini-4-flash");
+    let count_after_first = fs::read_to_string(&counter_file).unwrap();
+    assert_eq!(count_after_first.trim(), "1");
+
+    let models_cached = AntigravityTranslatorAdapter::fetch_available_models(&script_path).await;
+    assert_eq!(models_cached.len(), 2);
+    assert_eq!(models_cached[0].0, "gemini-4-flash");
+    let count_after_second = fs::read_to_string(&counter_file).unwrap();
+    assert_eq!(count_after_second.trim(), "1");
+
+    AntigravityTranslatorAdapter::clear_model_cache();
+
+    let models_after_clear =
+        AntigravityTranslatorAdapter::fetch_available_models(&script_path).await;
+    assert_eq!(models_after_clear.len(), 2);
+    let count_after_clear = fs::read_to_string(&counter_file).unwrap();
+    assert_eq!(count_after_clear.trim(), "2");
+
+    let _ = fs::remove_file(script_path);
+    let _ = fs::remove_file(counter_file);
+}
+
+#[tokio::test]
+async fn test_fetch_available_models_timeout_resilience() {
+    AntigravityTranslatorAdapter::clear_model_cache();
+
+    let script_content = "#!/bin/sh\nsleep 10\necho \"delayed-model Delayed\"\nexit 0\n";
+    let script_path = create_mock_script(script_content, "mock_agy_models_timeout.sh");
+
+    let models = AntigravityTranslatorAdapter::fetch_available_models(&script_path).await;
+    assert!(models.is_empty());
+
+    let _ = fs::remove_file(script_path);
+}
+
+#[tokio::test]
 async fn test_interactive_prompter_prompt_model_with_provided_argument() {
-    let res_default = InteractivePrompter::prompt_model(Some("default".to_string()))
+    let adapter = AntigravityTranslatorAdapter::default();
+    let res_default = InteractivePrompter::prompt_model(Some("default".to_string()), &adapter)
         .await
         .unwrap();
     assert_eq!(res_default, None);
 
     let res_system_default =
-        InteractivePrompter::prompt_model(Some("[Padrão do Sistema]".to_string()))
+        InteractivePrompter::prompt_model(Some("[Padrão do Sistema]".to_string()), &adapter)
             .await
             .unwrap();
     assert_eq!(res_system_default, None);
 
-    let res_empty = InteractivePrompter::prompt_model(Some("   ".to_string()))
+    let res_empty = InteractivePrompter::prompt_model(Some("   ".to_string()), &adapter)
         .await
         .unwrap();
     assert_eq!(res_empty, None);
 
-    let res_custom = InteractivePrompter::prompt_model(Some("gemini-3.8-flash-high".to_string()))
-        .await
-        .unwrap();
+    let res_custom =
+        InteractivePrompter::prompt_model(Some("gemini-3.8-flash-high".to_string()), &adapter)
+            .await
+            .unwrap();
     assert_eq!(res_custom, Some("gemini-3.8-flash-high".to_string()));
 }
 
@@ -176,7 +231,7 @@ async fn test_antigravity_non_transient_error_fails_immediately() {
         let _ = fs::remove_file(&counter_file);
     }
     let script_content = format!(
-        "#!/bin/sh\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\necho \"Unknown option --invalid-flag\" >&2\nexit 1\n",
+        "#!/bin/sh\ncat > /dev/null\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\necho \"Unknown option --invalid-flag\" >&2\nexit 1\n",
         counter_file.display(),
         counter_file.display(),
         counter_file.display()
@@ -254,12 +309,7 @@ async fn test_antigravity_adaptive_partitioning_giant_chapter() {
 
     let script_content = format!(
         r#"#!/bin/sh
-COUNT=0
-if [ -f "{}" ]; then
-  COUNT=$(cat "{}")
-fi
-COUNT=$((COUNT + 1))
-echo "$COUNT" > "{}"
+echo "call" >> "{}"
 
 PROMPT=$(cat)
 BODY=$(echo "$PROMPT" | awk '/DOCUMENT CONTENT TO TRANSLATE:/ {{flag=1; next}} flag')
@@ -269,8 +319,6 @@ TRANSLATED=$(echo "$BODY" | sed 's/Hello/Olá/g; s/World/Mundo/g; s/Story/Histó
 printf '{{"status":"ok","response":"%s"}}\n' "$(echo "$TRANSLATED" | tr '\n' ' ')"
 exit 0
 "#,
-        call_counter.display(),
-        call_counter.display(),
         call_counter.display()
     );
 
@@ -298,7 +346,7 @@ exit 0
         .unwrap();
 
     let calls = fs::read_to_string(&call_counter).unwrap();
-    let num_calls: usize = calls.trim().parse().unwrap();
+    let num_calls = calls.lines().count();
     assert!(num_calls >= 2);
 
     assert!(res.translated_text.contains("<title>Original</title>"));

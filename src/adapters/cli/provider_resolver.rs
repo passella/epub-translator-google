@@ -2,6 +2,7 @@ use crate::adapters::cli::args::CliArgs;
 use crate::adapters::cli::interactive::InteractivePrompter;
 use crate::domain::entities::{ProviderConfig, TranslationProviderKind};
 use crate::domain::errors::AppError;
+use crate::domain::ports::ModelDiscoveryPort;
 use std::sync::Arc;
 
 pub use crate::adapters::translator::{
@@ -33,11 +34,17 @@ impl ProviderConfigResolver {
         provider_kind: TranslationProviderKind,
         args: &CliArgs,
         is_headless: bool,
+        discovery_override: Option<&dyn ModelDiscoveryPort>,
     ) -> Result<ProviderConfig, AppError> {
-        let model = if is_headless || provider_kind != TranslationProviderKind::Antigravity {
+        let registration = ProviderRegistry::global().get(provider_kind)?;
+        let discovery = discovery_override.or(registration.model_discovery.as_deref());
+
+        let model = if is_headless {
             args.model.clone()
+        } else if let Some(discovery_port) = discovery {
+            InteractivePrompter::prompt_model(args.model.clone(), discovery_port).await?
         } else {
-            InteractivePrompter::prompt_model(args.model.clone()).await?
+            args.model.clone()
         };
 
         let mut api_key = args.api_key.clone();

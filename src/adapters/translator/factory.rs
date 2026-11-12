@@ -7,7 +7,7 @@ use crate::adapters::translator::{
 };
 use crate::domain::entities::{ProviderConfig, TranslationProviderKind};
 use crate::domain::errors::AppError;
-use crate::domain::ports::{TranslationCachePort, TranslatorPort};
+use crate::domain::ports::{ModelDiscoveryPort, TranslationCachePort, TranslatorPort};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
@@ -49,6 +49,7 @@ pub struct ProviderRegistration {
     pub metadata: ProviderMetadata,
     pub option_resolver: Arc<dyn ProviderOptionResolver>,
     pub factory: TranslatorConstructor,
+    pub model_discovery: Option<Arc<dyn ModelDiscoveryPort>>,
 }
 
 impl ProviderRegistration {
@@ -61,7 +62,13 @@ impl ProviderRegistration {
             metadata,
             option_resolver,
             factory,
+            model_discovery: None,
         }
+    }
+
+    pub fn with_model_discovery(mut self, model_discovery: Arc<dyn ModelDiscoveryPort>) -> Self {
+        self.model_discovery = Some(model_discovery);
+        self
     }
 }
 
@@ -190,7 +197,8 @@ impl ProviderRegistry {
                     "Invalid config for Antigravity provider".to_string(),
                 )),
             }),
-        );
+        )
+        .with_model_discovery(Arc::new(AntigravityTranslatorAdapter::new(None)));
 
         let google_free_entry = ProviderRegistration::new(
             ProviderMetadata::new(

@@ -315,3 +315,57 @@ fn test_provider_config_constructors_and_helpers() {
     );
     assert_eq!(created_from_new.api_key(), Some("from-new-key"));
 }
+
+#[tokio::test]
+async fn test_provider_config_resolver_resolve_interactive_headless() {
+    let args = create_test_args(Some("custom-model".to_string()), None);
+    let config = ProviderConfigResolver::resolve_interactive(
+        TranslationProviderKind::Antigravity,
+        &args,
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(config.model(), Some("custom-model"));
+}
+
+#[tokio::test]
+async fn test_provider_config_resolver_resolve_interactive_with_discovery_override() {
+    struct TestDiscovery;
+    #[async_trait::async_trait]
+    impl epub_translator_google::domain::ports::ModelDiscoveryPort for TestDiscovery {
+        async fn fetch_available_models(&self) -> Vec<(String, String)> {
+            vec![("test-model-1".to_string(), "Test Model 1".to_string())]
+        }
+    }
+
+    let discovery = TestDiscovery;
+    let args = create_test_args(Some("test-model-1".to_string()), None);
+    let config = ProviderConfigResolver::resolve_interactive(
+        TranslationProviderKind::Antigravity,
+        &args,
+        false,
+        Some(&discovery),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(config.model(), Some("test-model-1"));
+}
+
+#[tokio::test]
+async fn test_provider_config_resolver_resolve_interactive_provider_without_discovery() {
+    let args = create_test_args(Some("ignored-model".to_string()), None);
+    let config = ProviderConfigResolver::resolve_interactive(
+        TranslationProviderKind::GoogleFree,
+        &args,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(config, ProviderConfig::GoogleFree);
+}

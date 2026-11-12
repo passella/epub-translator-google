@@ -1,3 +1,5 @@
+use super::xhtml_common::{extract_tag_name, find_tag_closing_bracket};
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlanSegment {
     Verbatim(String),
@@ -118,8 +120,7 @@ impl XhtmlPartitioner {
             return (String::new(), html.to_string(), String::new());
         }
 
-        let Some(rel_open_bracket) = Self::find_tag_closing_bracket(&html[body_open_start..])
-        else {
+        let Some(rel_open_bracket) = find_tag_closing_bracket(&html[body_open_start..]) else {
             return (String::new(), html.to_string(), String::new());
         };
         let body_open_end = body_open_start + rel_open_bracket + 1;
@@ -194,7 +195,7 @@ impl XhtmlPartitioner {
             }
 
             if content[next_open..].starts_with("<!") {
-                let end = match Self::find_tag_closing_bracket(&content[next_open..]) {
+                let end = match find_tag_closing_bracket(&content[next_open..]) {
                     Some(idx) => next_open + idx + 1,
                     None => content.len(),
                 };
@@ -204,7 +205,7 @@ impl XhtmlPartitioner {
             }
 
             if content[next_open..].starts_with("</") {
-                let end = match Self::find_tag_closing_bracket(&content[next_open..]) {
+                let end = match find_tag_closing_bracket(&content[next_open..]) {
                     Some(idx) => next_open + idx + 1,
                     None => content.len(),
                 };
@@ -213,8 +214,8 @@ impl XhtmlPartitioner {
                 continue;
             }
 
-            let tag_name = Self::extract_tag_name(&content[next_open..]);
-            let open_tag_end = match Self::find_tag_closing_bracket(&content[next_open..]) {
+            let tag_name = extract_tag_name(&content[next_open..]);
+            let open_tag_end = match find_tag_closing_bracket(&content[next_open..]) {
                 Some(idx) => next_open + idx + 1,
                 None => content.len(),
             };
@@ -328,46 +329,9 @@ impl XhtmlPartitioner {
         }
     }
 
-    fn find_tag_closing_bracket(slice: &str) -> Option<usize> {
-        let mut in_quote = None;
-        for (idx, ch) in slice.char_indices() {
-            if let Some(q) = in_quote {
-                if ch == q || ch == '<' || ch == '\n' {
-                    in_quote = None;
-                }
-            } else if ch == '"' || ch == '\'' {
-                in_quote = Some(ch);
-            } else if ch == '>' {
-                return Some(idx);
-            }
-        }
-        None
-    }
-
-    fn extract_tag_name(slice: &str) -> String {
-        let trimmed = slice.trim_start();
-        let without_open = if let Some(stripped) = trimmed.strip_prefix("</") {
-            stripped
-        } else if let Some(stripped) = trimmed.strip_prefix('<') {
-            stripped
-        } else {
-            return String::new();
-        };
-
-        let mut name = String::new();
-        for ch in without_open.chars() {
-            if ch.is_ascii_alphanumeric() || ch == ':' || ch == '_' || ch == '-' {
-                name.push(ch);
-            } else {
-                break;
-            }
-        }
-        name.to_ascii_lowercase()
-    }
-
     fn find_matching_close_tag(slice: &str, target_tag: &str) -> Option<usize> {
         let mut depth = 1usize;
-        let mut cur = Self::find_tag_closing_bracket(slice)? + 1;
+        let mut cur = find_tag_closing_bracket(slice)? + 1;
 
         while cur < slice.len() && depth > 0 {
             let next_open = match slice[cur..].find('<') {
@@ -400,8 +364,8 @@ impl XhtmlPartitioner {
             }
 
             if slice[next_open..].starts_with("</") {
-                let tag_name = Self::extract_tag_name(&slice[next_open..]);
-                let close_end = match Self::find_tag_closing_bracket(&slice[next_open..]) {
+                let tag_name = extract_tag_name(&slice[next_open..]);
+                let close_end = match find_tag_closing_bracket(&slice[next_open..]) {
                     Some(idx) => next_open + idx + 1,
                     None => slice.len(),
                 };
@@ -416,8 +380,8 @@ impl XhtmlPartitioner {
             }
 
             if slice[next_open..].starts_with('<') {
-                let tag_name = Self::extract_tag_name(&slice[next_open..]);
-                let tag_end = match Self::find_tag_closing_bracket(&slice[next_open..]) {
+                let tag_name = extract_tag_name(&slice[next_open..]);
+                let tag_end = match find_tag_closing_bracket(&slice[next_open..]) {
                     Some(idx) => next_open + idx + 1,
                     None => slice.len(),
                 };

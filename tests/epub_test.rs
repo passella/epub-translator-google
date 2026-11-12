@@ -100,7 +100,7 @@ async fn test_zip_epub_read_and_write() {
     let mut out_zip = ZipArchive::new(BufReader::new(out_file)).unwrap();
 
     let mut first_entry = out_zip.by_index(0).unwrap();
-    assert_eq!(first_entry.name(), "mimetype");
+    assert_eq!(first_entry.name().unwrap(), "mimetype");
     assert_eq!(first_entry.compression(), CompressionMethod::Stored);
 
     let mut mimetype_content = String::new();

@@ -1,4 +1,3 @@
-use crate::adapters::translator::AntigravityTranslatorAdapter;
 use crate::domain::entities::{Language, TranslationProviderKind};
 use crate::domain::errors::AppError;
 use crate::domain::ports::ModelDiscoveryPort;
@@ -125,12 +124,7 @@ impl InteractivePrompter {
         }
     }
 
-    pub async fn prompt_model(provided: Option<String>) -> Result<Option<String>, AppError> {
-        let adapter = AntigravityTranslatorAdapter::default();
-        Self::prompt_model_with_discovery(provided, &adapter).await
-    }
-
-    pub async fn prompt_model_with_discovery(
+    pub async fn prompt_model(
         provided: Option<String>,
         discovery: &dyn ModelDiscoveryPort,
     ) -> Result<Option<String>, AppError> {
@@ -181,6 +175,13 @@ impl InteractivePrompter {
             let model_id = selection.split_whitespace().next().unwrap_or(&selection);
             Ok(Some(model_id.to_string()))
         }
+    }
+
+    pub async fn prompt_model_with_discovery(
+        provided: Option<String>,
+        discovery: &dyn ModelDiscoveryPort,
+    ) -> Result<Option<String>, AppError> {
+        Self::prompt_model(provided, discovery).await
     }
 
     pub fn compute_default_output(input: &Path, target: &Language) -> PathBuf {

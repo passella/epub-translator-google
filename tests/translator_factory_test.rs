@@ -115,6 +115,15 @@ fn test_provider_registry_global_contains_defaults() {
 
     let all_meta = registry.all_metadata().unwrap();
     assert_eq!(all_meta.len(), 3);
+
+    let agy_reg = registry.get(TranslationProviderKind::Antigravity).unwrap();
+    assert!(agy_reg.model_discovery.is_some());
+
+    let free_reg = registry.get(TranslationProviderKind::GoogleFree).unwrap();
+    assert!(free_reg.model_discovery.is_none());
+
+    let cloud_reg = registry.get(TranslationProviderKind::GoogleCloud).unwrap();
+    assert!(cloud_reg.model_discovery.is_none());
 }
 
 #[test]

@@ -1,5 +1,6 @@
+use crate::adapters::translator::http_util::{HttpRequestSnapshot, extract_headers};
 use crate::domain::entities::{Language, TranslationResult};
-use crate::domain::errors::{HttpErrorDetails, TranslationError};
+use crate::domain::errors::TranslationError;
 use crate::domain::ports::TranslatorPort;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -187,66 +188,29 @@ impl GoogleFreeTranslatorAdapter {
                 TranslationError::Http(format!("Failed to build HTTP request: {e}"))
             })?;
 
-        let request_method = request.method().to_string();
-        let request_url = request.url().to_string();
-        let request_headers: Vec<(String, String)> = request
-            .headers()
-            .iter()
-            .map(|(name, val)| {
-                (
-                    name.as_str().to_string(),
-                    val.to_str().unwrap_or("[non-utf8 header]").to_string(),
-                )
-            })
-            .collect();
-        let request_body = request
-            .body()
-            .and_then(|b| b.as_bytes())
-            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
-            .unwrap_or_default();
-
+        let snapshot = HttpRequestSnapshot::from_request(&request, &[]);
         let response = self.client.execute(request).await.map_err(|e| {
-            TranslationError::HttpDetailed(Box::new(HttpErrorDetails {
-                url: request_url.clone(),
-                method: request_method.clone(),
-                request_headers: request_headers.clone(),
-                request_body: request_body.clone(),
-                status_code: 0,
-                response_headers: Vec::new(),
-                response_body: String::new(),
-                message: format!("Google Free HTTP network failure: {e}"),
-            }))
+            TranslationError::HttpDetailed(Box::new(
+                snapshot.to_network_error_details(format!("Google Free HTTP network failure: {e}")),
+            ))
         })?;
 
         let status = response.status();
         let status_code = status.as_u16();
 
         if !status.is_success() {
-            let response_headers = response
-                .headers()
-                .iter()
-                .map(|(name, val)| {
-                    (
-                        name.as_str().to_string(),
-                        val.to_str().unwrap_or("[non-utf8 header]").to_string(),
-                    )
-                })
-                .collect();
+            let response_headers = extract_headers(response.headers());
             let response_body = response
                 .text()
                 .await
                 .unwrap_or_else(|e| format!("[Failed to read body: {e}]"));
 
-            let error_details = Box::new(HttpErrorDetails {
-                url: request_url,
-                method: request_method,
-                request_headers,
-                request_body,
+            let error_details = Box::new(snapshot.to_http_error_details(
                 status_code,
                 response_headers,
-                response_body: response_body.clone(),
-                message: format!("Google Free endpoint failed with HTTP {status}"),
-            });
+                response_body.clone(),
+                format!("Google Free endpoint failed with HTTP {status}"),
+            ));
 
             if status_code == 429 {
                 return Err(TranslationError::RateLimited(format!(
@@ -331,6 +295,59 @@ impl GoogleFreeTranslatorAdapter {
         unmasked
     }
 
+    pub fn normalize_placeholders(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+
+        while !rest.is_empty() {
+            if rest.starts_with("[[") {
+                if let Some(end) = rest[2..].find("]]") {
+                    let candidate = &rest[2..2 + end];
+                    let trimmed = candidate.trim();
+                    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                        out.push('⟦');
+                        out.push_str(trimmed);
+                        out.push('⟧');
+                        rest = &rest[2 + end + 2..];
+                        continue;
+                    }
+                }
+            } else if rest.starts_with('⟦') {
+                let start_len = '⟦'.len_utf8();
+                if let Some(end) = rest[start_len..].find('⟧') {
+                    let candidate = &rest[start_len..start_len + end];
+                    let trimmed = candidate.trim();
+                    if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                        out.push('⟦');
+                        out.push_str(trimmed);
+                        out.push('⟧');
+                        rest = &rest[start_len + end + '⟧'.len_utf8()..];
+                        continue;
+                    }
+                }
+            } else if rest.starts_with('[')
+                && let Some(end) = rest[1..].find(']')
+            {
+                let candidate = &rest[1..1 + end];
+                let trimmed = candidate.trim();
+                if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                    out.push('⟦');
+                    out.push_str(trimmed);
+                    out.push('⟧');
+                    rest = &rest[1 + end + 1..];
+                    continue;
+                }
+            }
+
+            if let Some(ch) = rest.chars().next() {
+                out.push(ch);
+                rest = &rest[ch.len_utf8()..];
+            }
+        }
+
+        out
+    }
+
     pub fn find_orphan_placeholders(text: &str) -> Vec<String> {
         let mut orphans = Vec::new();
         let mut rest = text;
@@ -371,13 +388,10 @@ impl GoogleFreeTranslatorAdapter {
 
 impl Default for GoogleFreeTranslatorAdapter {
     fn default() -> Self {
-        match Self::new() {
-            Ok(adapter) => adapter,
-            Err(_) => Self {
-                client: Client::new(),
-                semaphore: Arc::new(Semaphore::new(1)),
-            },
-        }
+        Self::new().unwrap_or_else(|_| Self {
+            client: Client::new(),
+            semaphore: Arc::new(Semaphore::new(1)),
+        })
     }
 }
 
@@ -420,9 +434,11 @@ impl TranslatorPort for GoogleFreeTranslatorAdapter {
         }
 
         let combined = translated_pieces.concat();
-        let unmasked = Self::unmask_html(&combined, &tags);
+        let normalized = Self::normalize_placeholders(&combined);
+        let unmasked = Self::unmask_html(&normalized, &tags);
+        let normalized_unmasked = Self::normalize_placeholders(&unmasked);
 
-        let orphans = Self::find_orphan_placeholders(&unmasked);
+        let orphans = Self::find_orphan_placeholders(&normalized_unmasked);
         if !orphans.is_empty() {
             return Err(TranslationError::Provider(format!(
                 "Orphan or corrupted tag placeholders detected after unmasking: {orphans:?}"
@@ -441,12 +457,7 @@ impl TranslatorPort for GoogleFreeTranslatorAdapter {
         source_lang: &Language,
         target_lang: &Language,
     ) -> Result<Vec<TranslationResult>, TranslationError> {
-        let mut results = Vec::with_capacity(texts.len());
-        for text in texts {
-            let res = self.translate_html(text, source_lang, target_lang).await?;
-            results.push(res);
-        }
-        Ok(results)
+        super::common::translate_batch_sequential(self, texts, source_lang, target_lang).await
     }
 
     fn provider_name(&self) -> &'static str {
