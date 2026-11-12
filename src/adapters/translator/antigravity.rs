@@ -1,6 +1,6 @@
 use crate::domain::entities::{Language, TranslationResult};
 use crate::domain::errors::{ProcessErrorDetails, TranslationError};
-use crate::domain::ports::{TranslationCachePort, TranslatorPort};
+use crate::domain::ports::{ModelDiscoveryPort, TranslationCachePort, TranslatorPort};
 use crate::domain::services::{XhtmlPartitioner, XhtmlValidator};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -167,11 +167,12 @@ impl AntigravityTranslatorAdapter {
         }
     }
 
-    pub fn fetch_available_models(binary_path: &Path) -> Vec<(String, String)> {
-        let output = match std::process::Command::new(binary_path)
+    pub async fn fetch_available_models(binary_path: &Path) -> Vec<(String, String)> {
+        let output = match tokio::process::Command::new(binary_path)
             .arg("models")
             .stderr(std::process::Stdio::null())
             .output()
+            .await
         {
             Ok(out) => out,
             Err(_) => return Vec::new(),
@@ -353,20 +354,8 @@ impl AntigravityTranslatorAdapter {
             ));
         }
 
-        let validated_html = match XhtmlValidator::heal_and_validate(&cleaned_html) {
-            Ok(val) => val,
-            Err(e) => {
-                return Err((
-                    TranslationError::XmlValidation(format!(
-                        "agy translation output failed XML 1.0 validation: {e}"
-                    )),
-                    true,
-                ));
-            }
-        };
-
         Ok(TranslationResult {
-            translated_text: validated_html,
+            translated_text: cleaned_html,
             detected_source: None,
         })
     }
@@ -448,9 +437,19 @@ impl TranslatorPort for AntigravityTranslatorAdapter {
     ) -> Result<TranslationResult, TranslationError> {
         let partitioner = XhtmlPartitioner::with_threshold(self.partition_threshold);
         if !partitioner.is_giant(html) {
-            return self
+            let result = self
                 .translate_single_content(html, source_lang, target_lang)
-                .await;
+                .await?;
+            let validated =
+                XhtmlValidator::heal_and_validate(&result.translated_text).map_err(|e| {
+                    TranslationError::XmlValidation(format!(
+                        "agy translation output failed XML 1.0 validation: {e}"
+                    ))
+                })?;
+            return Ok(TranslationResult {
+                translated_text: validated,
+                detected_source: result.detected_source,
+            });
         }
 
         let plan = partitioner.partition(html);
@@ -494,8 +493,13 @@ impl TranslatorPort for AntigravityTranslatorAdapter {
         if uncached_indices.is_empty() {
             let final_pieces: Vec<String> = translated_pieces.into_iter().flatten().collect();
             let recomposed = plan.recompose(&final_pieces);
+            let validated = XhtmlValidator::heal_and_validate(&recomposed).map_err(|e| {
+                TranslationError::XmlValidation(format!(
+                    "agy recomposed translation output failed XML 1.0 validation: {e}"
+                ))
+            })?;
             return Ok(TranslationResult {
-                translated_text: recomposed,
+                translated_text: validated,
                 detected_source: None,
             });
         }
@@ -582,8 +586,13 @@ impl TranslatorPort for AntigravityTranslatorAdapter {
         }
 
         let recomposed = plan.recompose(&final_pieces);
+        let validated = XhtmlValidator::heal_and_validate(&recomposed).map_err(|e| {
+            TranslationError::XmlValidation(format!(
+                "agy recomposed translation output failed XML 1.0 validation: {e}"
+            ))
+        })?;
         Ok(TranslationResult {
-            translated_text: recomposed,
+            translated_text: validated,
             detected_source,
         })
     }
@@ -608,5 +617,12 @@ impl TranslatorPort for AntigravityTranslatorAdapter {
 
     fn model_name(&self) -> Option<&str> {
         self.model.as_deref()
+    }
+}
+
+#[async_trait]
+impl ModelDiscoveryPort for AntigravityTranslatorAdapter {
+    async fn fetch_available_models(&self) -> Vec<(String, String)> {
+        Self::fetch_available_models(&self.binary_path).await
     }
 }

@@ -57,8 +57,7 @@ fn test_google_cloud_precedence_cloud_key_beats_all() {
     };
     let resolved = resolver
         .resolve_api_key_with_env(
-            &args,
-            true,
+            &args.to_provider_options(true),
             || Some("env-translate-3".to_string()),
             || Some("env-google-4".to_string()),
         )
@@ -77,8 +76,7 @@ fn test_google_cloud_precedence_cloud_key_whitespace_falls_back_to_api_key() {
     };
     let resolved = resolver
         .resolve_api_key_with_env(
-            &args,
-            true,
+            &args.to_provider_options(true),
             || Some("env-translate-3".to_string()),
             || Some("env-google-4".to_string()),
         )
@@ -97,8 +95,7 @@ fn test_google_cloud_precedence_api_key_beats_env_vars() {
     };
     let resolved = resolver
         .resolve_api_key_with_env(
-            &args,
-            true,
+            &args.to_provider_options(true),
             || Some("env-translate-3".to_string()),
             || Some("env-google-4".to_string()),
         )
@@ -117,8 +114,7 @@ fn test_google_cloud_precedence_api_key_whitespace_falls_back_to_translate_env()
     };
     let resolved = resolver
         .resolve_api_key_with_env(
-            &args,
-            true,
+            &args.to_provider_options(true),
             || Some("env-translate-3".to_string()),
             || Some("env-google-4".to_string()),
         )
@@ -137,8 +133,7 @@ fn test_google_cloud_precedence_translate_env_beats_google_env() {
     };
     let resolved = resolver
         .resolve_api_key_with_env(
-            &args,
-            true,
+            &args.to_provider_options(true),
             || Some("env-translate-3".to_string()),
             || Some("env-google-4".to_string()),
         )
@@ -157,8 +152,7 @@ fn test_google_cloud_precedence_translate_env_whitespace_falls_back_to_google_en
     };
     let resolved = resolver
         .resolve_api_key_with_env(
-            &args,
-            true,
+            &args.to_provider_options(true),
             || Some("   ".to_string()),
             || Some("env-google-4".to_string()),
         )
@@ -176,7 +170,7 @@ fn test_google_cloud_precedence_all_empty_headless_returns_empty_string() {
         ..Default::default()
     };
     let resolved = resolver
-        .resolve_api_key_with_env(&args, true, || None, || None)
+        .resolve_api_key_with_env(&args.to_provider_options(true), || None, || None)
         .unwrap();
 
     assert_eq!(resolved, "");
@@ -186,7 +180,7 @@ fn test_google_cloud_precedence_all_empty_headless_returns_empty_string() {
 fn test_antigravity_resolver_when_empty_or_whitespace_model_returns_none() {
     let resolver = AntigravityOptionResolver;
     let args = create_test_args(Some("   ".to_string()), None);
-    let config = resolver.resolve(&args, false).unwrap();
+    let config = resolver.resolve(&args.to_provider_options(false)).unwrap();
 
     assert_eq!(config.model(), None);
     assert_eq!(config.provider_kind(), TranslationProviderKind::Antigravity);
@@ -196,7 +190,7 @@ fn test_antigravity_resolver_when_empty_or_whitespace_model_returns_none() {
 fn test_antigravity_resolver_when_default_keyword_returns_none() {
     let resolver = AntigravityOptionResolver;
     let args = create_test_args(Some("default".to_string()), None);
-    let config = resolver.resolve(&args, false).unwrap();
+    let config = resolver.resolve(&args.to_provider_options(false)).unwrap();
 
     assert_eq!(config.model(), None);
     assert_eq!(config.provider_kind(), TranslationProviderKind::Antigravity);
@@ -206,7 +200,7 @@ fn test_antigravity_resolver_when_default_keyword_returns_none() {
 fn test_antigravity_resolver_when_headless_and_model_is_none_returns_none() {
     let resolver = AntigravityOptionResolver;
     let args = create_test_args(None, None);
-    let config = resolver.resolve(&args, true).unwrap();
+    let config = resolver.resolve(&args.to_provider_options(true)).unwrap();
 
     assert_eq!(config.model(), None);
     assert_eq!(config.provider_kind(), TranslationProviderKind::Antigravity);
@@ -217,7 +211,7 @@ fn test_google_free_resolver_always_returns_google_free_variant() {
     let resolver = GoogleFreeOptionResolver;
     let args = create_test_args(None, None);
 
-    let headless_config = resolver.resolve(&args, true).unwrap();
+    let headless_config = resolver.resolve(&args.to_provider_options(true)).unwrap();
     assert_eq!(headless_config, ProviderConfig::GoogleFree);
     assert_eq!(
         headless_config.provider_kind(),
@@ -226,7 +220,7 @@ fn test_google_free_resolver_always_returns_google_free_variant() {
     assert_eq!(headless_config.model(), None);
     assert_eq!(headless_config.api_key(), None);
 
-    let interactive_config = resolver.resolve(&args, false).unwrap();
+    let interactive_config = resolver.resolve(&args.to_provider_options(false)).unwrap();
     assert_eq!(interactive_config, ProviderConfig::GoogleFree);
 }
 
@@ -235,14 +229,14 @@ fn test_google_cloud_resolver_when_api_key_provided_returns_key() {
     let resolver = GoogleCloudOptionResolver;
     let args = create_test_args(None, Some("secret_token_123".to_string()));
 
-    let headless_config = resolver.resolve(&args, true).unwrap();
+    let headless_config = resolver.resolve(&args.to_provider_options(true)).unwrap();
     assert_eq!(headless_config.api_key(), Some("secret_token_123"));
     assert_eq!(
         headless_config.provider_kind(),
         TranslationProviderKind::GoogleCloud
     );
 
-    let interactive_config = resolver.resolve(&args, false).unwrap();
+    let interactive_config = resolver.resolve(&args.to_provider_options(false)).unwrap();
     assert_eq!(interactive_config.api_key(), Some("secret_token_123"));
 }
 
@@ -250,7 +244,7 @@ fn test_google_cloud_resolver_when_api_key_provided_returns_key() {
 fn test_antigravity_resolver_when_headless_and_model_provided_returns_model() {
     let resolver = AntigravityOptionResolver;
     let args = create_test_args(Some("gemini-4-argon-high".to_string()), None);
-    let config = resolver.resolve(&args, true).unwrap();
+    let config = resolver.resolve(&args.to_provider_options(true)).unwrap();
 
     assert_eq!(config.model(), Some("gemini-4-argon-high"));
     assert_eq!(config.provider_kind(), TranslationProviderKind::Antigravity);
@@ -260,7 +254,7 @@ fn test_antigravity_resolver_when_headless_and_model_provided_returns_model() {
 fn test_antigravity_resolver_when_interactive_and_model_provided_returns_model() {
     let resolver = AntigravityOptionResolver;
     let args = create_test_args(Some("gemini-3.8-flash-high".to_string()), None);
-    let config = resolver.resolve(&args, false).unwrap();
+    let config = resolver.resolve(&args.to_provider_options(false)).unwrap();
 
     assert_eq!(config.model(), Some("gemini-3.8-flash-high"));
     assert_eq!(config.provider_kind(), TranslationProviderKind::Antigravity);

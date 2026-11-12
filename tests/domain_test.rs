@@ -1,6 +1,5 @@
 use epub_translator_google::domain::entities::{
-    EpubBook, EpubChapter, EpubMetadata, Language, TranslationProviderKind, TranslationRequest,
-    TranslationResult,
+    EpubBook, EpubChapter, EpubMetadata, Language, TranslationProviderKind, TranslationResult,
 };
 use std::str::FromStr;
 
@@ -49,15 +48,7 @@ fn test_translation_provider_kind_parsing() {
 }
 
 #[test]
-fn test_translation_request_and_result() {
-    let req = TranslationRequest {
-        text: "Hello".to_string(),
-        source_lang: Language::new("en"),
-        target_lang: Language::new("pt-BR"),
-        is_html: false,
-    };
-    assert_eq!(req.text, "Hello");
-
+fn test_translation_result() {
     let res = TranslationResult {
         translated_text: "Olá".to_string(),
         detected_source: Some(Language::new("en")),

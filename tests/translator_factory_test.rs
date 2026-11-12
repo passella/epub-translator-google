@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use epub_translator_google::adapters::cli::args::CliArgs;
-use epub_translator_google::adapters::cli::provider_resolver::ProviderOptionResolver;
 use epub_translator_google::adapters::translator::{
-    ProviderMetadata, ProviderRegistration, ProviderRegistry, TranslatorFactory,
+    ProviderMetadata, ProviderOptionResolver, ProviderOptions, ProviderRegistration,
+    ProviderRegistry, TranslatorFactory,
 };
 use epub_translator_google::domain::entities::{
     Language, ProviderConfig, TranslationProviderKind, TranslationResult,
@@ -44,7 +43,7 @@ impl TranslatorPort for MockCustomTranslator {
 struct MockOptionResolver;
 
 impl ProviderOptionResolver for MockOptionResolver {
-    fn resolve(&self, _args: &CliArgs, _is_headless: bool) -> Result<ProviderConfig, AppError> {
+    fn resolve(&self, _options: &ProviderOptions) -> Result<ProviderConfig, AppError> {
         Ok(ProviderConfig::GoogleFree)
     }
 }
@@ -67,8 +66,8 @@ fn test_provider_registry_create_translator_when_kind_not_registered_returns_err
 #[test]
 fn test_provider_registry_resolve_config_when_kind_not_registered_returns_error() {
     let registry = ProviderRegistry::new();
-    let args = CliArgs::default();
-    let result = registry.resolve_config(TranslationProviderKind::Antigravity, &args, true);
+    let options = ProviderOptions::default();
+    let result = registry.resolve_config(TranslationProviderKind::Antigravity, &options);
     assert!(result.is_err());
 }
 

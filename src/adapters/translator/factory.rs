@@ -1,7 +1,6 @@
-use crate::adapters::cli::args::CliArgs;
-use crate::adapters::cli::provider_resolver::{
+use crate::adapters::translator::options::{
     AntigravityOptionResolver, GoogleCloudOptionResolver, GoogleFreeOptionResolver,
-    ProviderOptionResolver,
+    ProviderOptionResolver, ProviderOptions,
 };
 use crate::adapters::translator::{
     AntigravityTranslatorAdapter, GoogleCloudTranslatorAdapter, GoogleFreeTranslatorAdapter,
@@ -126,11 +125,10 @@ impl ProviderRegistry {
     pub fn resolve_config(
         &self,
         kind: TranslationProviderKind,
-        args: &CliArgs,
-        is_headless: bool,
+        options: &ProviderOptions,
     ) -> Result<ProviderConfig, AppError> {
         let registration = self.get(kind)?;
-        registration.option_resolver.resolve(args, is_headless)
+        registration.option_resolver.resolve(options)
     }
 
     pub fn create_translator(

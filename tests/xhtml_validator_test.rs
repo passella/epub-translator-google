@@ -145,7 +145,6 @@ fn test_heal_interleaved_section_div_tags() {
 
 #[test]
 fn test_heal_combined_real_world_case() {
-
     let malformed =
         r#"<div class="note-box><p>Aviso: AT&T informou que <br>o serviço falhou</div>"#;
     let healed = XhtmlValidator::heal_and_validate(malformed).unwrap();

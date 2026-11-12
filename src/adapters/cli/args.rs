@@ -1,3 +1,4 @@
+use crate::adapters::translator::ProviderOptions;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
@@ -124,6 +125,16 @@ impl CliArgs {
             Some(path.as_path())
         } else {
             None
+        }
+    }
+
+    pub fn to_provider_options(&self, is_headless: bool) -> ProviderOptions {
+        ProviderOptions {
+            model: self.model.clone(),
+            block_concurrency: self.block_concurrency as usize,
+            api_key: self.api_key.clone(),
+            cloud_key: self.cloud_key.clone(),
+            is_headless,
         }
     }
 }

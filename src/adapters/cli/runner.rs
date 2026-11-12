@@ -266,7 +266,8 @@ impl CliRunner {
         };
         ctx.provider = Some(provider_kind.as_str().to_string());
 
-        let provider_config = ProviderConfigResolver::resolve(provider_kind, &args, is_headless)?;
+        let provider_config =
+            ProviderConfigResolver::resolve_interactive(provider_kind, &args, is_headless).await?;
         ctx.model = provider_config.model().map(ToString::to_string);
 
         let output_path = if is_headless {

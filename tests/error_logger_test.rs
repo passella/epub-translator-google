@@ -60,6 +60,12 @@ fn test_diagnose_root_cause_e2big_argument_list_too_long() {
 }
 
 #[test]
+fn test_resolve_logs_dir_portable() {
+    let logs_dir = ErrorLogger::resolve_logs_dir();
+    assert!(logs_dir.ends_with("epub-translator-google/logs"));
+}
+
+#[test]
 fn test_error_log_anti_collision_numbering() {
     let ts = LogTimestamp::now();
     let temp_dir = std::env::temp_dir().join(format!("test_collision_{}", ts.nanos));

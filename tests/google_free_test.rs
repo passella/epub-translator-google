@@ -112,3 +112,29 @@ fn test_html_unmasking_with_spaced_placeholders_and_double_digits() {
     assert!(!unmasked.contains("⟦"));
     assert!(!unmasked.contains("⟧"));
 }
+
+#[test]
+fn test_unmask_html_orphan_detection_negative_happy_path() {
+    let tags = vec!["<h1>".to_string(), "</h1>".to_string()];
+    let masked = "⟦0⟧Título Traduzido⟦1⟧";
+    let unmasked = GoogleFreeTranslatorAdapter::unmask_html(masked, &tags);
+    assert!(!GoogleFreeTranslatorAdapter::has_orphan_placeholders(
+        &unmasked
+    ));
+    assert!(GoogleFreeTranslatorAdapter::find_orphan_placeholders(&unmasked).is_empty());
+    assert_eq!(unmasked, "<h1>Título Traduzido</h1>");
+}
+
+#[test]
+fn test_unmask_html_orphan_detection_positive_missing_or_corrupted_tag() {
+    let tags = vec!["<h1>".to_string()];
+    let masked = "⟦0⟧Título Traduzido⟦1⟧ e mais texto ⟦ 2 ⟧";
+    let unmasked = GoogleFreeTranslatorAdapter::unmask_html(masked, &tags);
+    assert!(GoogleFreeTranslatorAdapter::has_orphan_placeholders(
+        &unmasked
+    ));
+    let orphans = GoogleFreeTranslatorAdapter::find_orphan_placeholders(&unmasked);
+    assert_eq!(orphans.len(), 2);
+    assert!(orphans.contains(&"⟦1⟧".to_string()));
+    assert!(orphans.contains(&"⟦ 2 ⟧".to_string()));
+}

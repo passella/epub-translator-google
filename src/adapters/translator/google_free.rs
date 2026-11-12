@@ -330,6 +330,43 @@ impl GoogleFreeTranslatorAdapter {
         }
         unmasked
     }
+
+    pub fn find_orphan_placeholders(text: &str) -> Vec<String> {
+        let mut orphans = Vec::new();
+        let mut rest = text;
+        while let Some(start) = rest.find('⟦') {
+            let after_start = &rest[start + '⟦'.len_utf8()..];
+            if let Some(end) = after_start.find('⟧') {
+                let candidate = &after_start[..end];
+                let trimmed = candidate.trim();
+                if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                    orphans.push(format!("⟦{candidate}⟧"));
+                }
+                rest = &after_start[end + '⟧'.len_utf8()..];
+            } else {
+                break;
+            }
+        }
+        orphans
+    }
+
+    pub fn has_orphan_placeholders(text: &str) -> bool {
+        let mut rest = text;
+        while let Some(start) = rest.find('⟦') {
+            let after_start = &rest[start + '⟦'.len_utf8()..];
+            if let Some(end) = after_start.find('⟧') {
+                let candidate = &after_start[..end];
+                let trimmed = candidate.trim();
+                if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+                rest = &after_start[end + '⟧'.len_utf8()..];
+            } else {
+                break;
+            }
+        }
+        false
+    }
 }
 
 impl Default for GoogleFreeTranslatorAdapter {
@@ -384,6 +421,13 @@ impl TranslatorPort for GoogleFreeTranslatorAdapter {
 
         let combined = translated_pieces.concat();
         let unmasked = Self::unmask_html(&combined, &tags);
+
+        let orphans = Self::find_orphan_placeholders(&unmasked);
+        if !orphans.is_empty() {
+            return Err(TranslationError::Provider(format!(
+                "Orphan or corrupted tag placeholders detected after unmasking: {orphans:?}"
+            )));
+        }
 
         Ok(TranslationResult {
             translated_text: unmasked,

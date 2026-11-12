@@ -5,106 +5,10 @@ use crate::domain::errors::AppError;
 use std::sync::Arc;
 
 pub use crate::adapters::translator::{
-    ProviderMetadata, ProviderRegistration, ProviderRegistry, TranslatorConstructor,
+    AntigravityOptionResolver, GoogleCloudOptionResolver, GoogleFreeOptionResolver,
+    ProviderMetadata, ProviderOptionResolver, ProviderOptions, ProviderRegistration,
+    ProviderRegistry, TranslatorConstructor,
 };
-
-pub trait ProviderOptionResolver: Send + Sync {
-    fn resolve(&self, args: &CliArgs, is_headless: bool) -> Result<ProviderConfig, AppError>;
-}
-
-pub struct AntigravityOptionResolver;
-
-impl ProviderOptionResolver for AntigravityOptionResolver {
-    fn resolve(&self, args: &CliArgs, is_headless: bool) -> Result<ProviderConfig, AppError> {
-        let model = if is_headless {
-            args.model.clone()
-        } else {
-            InteractivePrompter::prompt_model(args.model.clone())?
-        };
-        Ok(ProviderConfig::Antigravity {
-            model,
-            block_concurrency: Some(args.block_concurrency as usize),
-        })
-    }
-}
-
-pub struct GoogleFreeOptionResolver;
-
-impl ProviderOptionResolver for GoogleFreeOptionResolver {
-    fn resolve(&self, _args: &CliArgs, _is_headless: bool) -> Result<ProviderConfig, AppError> {
-        Ok(ProviderConfig::GoogleFree)
-    }
-}
-
-pub struct GoogleCloudOptionResolver;
-
-impl GoogleCloudOptionResolver {
-    pub fn resolve_api_key(&self, args: &CliArgs, is_headless: bool) -> Result<String, AppError> {
-        self.resolve_api_key_with_env(
-            args,
-            is_headless,
-            || std::env::var("GOOGLE_TRANSLATE_API_KEY").ok(),
-            || std::env::var("GOOGLE_API_KEY").ok(),
-        )
-    }
-
-    pub fn resolve_api_key_with_env<F1, F2>(
-        &self,
-        args: &CliArgs,
-        is_headless: bool,
-        translate_api_key_fn: F1,
-        google_api_key_fn: F2,
-    ) -> Result<String, AppError>
-    where
-        F1: FnOnce() -> Option<String>,
-        F2: FnOnce() -> Option<String>,
-    {
-        if let Some(key) = args
-            .cloud_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Ok(key.to_string());
-        }
-
-        if let Some(key) = args
-            .api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Ok(key.to_string());
-        }
-
-        if let Some(key) = translate_api_key_fn() {
-            let trimmed = key.trim();
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
-            }
-        }
-
-        if let Some(key) = google_api_key_fn() {
-            let trimmed = key.trim();
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
-            }
-        }
-
-        if is_headless {
-            return Ok(String::new());
-        }
-
-        InteractivePrompter::prompt_google_cloud_api_key()
-    }
-}
-
-impl ProviderOptionResolver for GoogleCloudOptionResolver {
-    fn resolve(&self, args: &CliArgs, is_headless: bool) -> Result<ProviderConfig, AppError> {
-        let api_key = self.resolve_api_key(args, is_headless)?;
-        Ok(ProviderConfig::GoogleCloud { api_key })
-    }
-}
 
 pub struct ProviderConfigResolver;
 
@@ -121,6 +25,44 @@ impl ProviderConfigResolver {
         args: &CliArgs,
         is_headless: bool,
     ) -> Result<ProviderConfig, AppError> {
-        ProviderRegistry::global().resolve_config(provider_kind, args, is_headless)
+        let options = args.to_provider_options(is_headless);
+        ProviderRegistry::global().resolve_config(provider_kind, &options)
+    }
+
+    pub async fn resolve_interactive(
+        provider_kind: TranslationProviderKind,
+        args: &CliArgs,
+        is_headless: bool,
+    ) -> Result<ProviderConfig, AppError> {
+        let model = if is_headless || provider_kind != TranslationProviderKind::Antigravity {
+            args.model.clone()
+        } else {
+            InteractivePrompter::prompt_model(args.model.clone()).await?
+        };
+
+        let mut api_key = args.api_key.clone();
+        if !is_headless && provider_kind == TranslationProviderKind::GoogleCloud {
+            let resolver = GoogleCloudOptionResolver;
+            let options = ProviderOptions {
+                model: None,
+                block_concurrency: 1,
+                api_key: args.api_key.clone(),
+                cloud_key: args.cloud_key.clone(),
+                is_headless: true,
+            };
+            let resolved_key = resolver.resolve_api_key(&options)?;
+            if resolved_key.is_empty() {
+                api_key = Some(InteractivePrompter::prompt_google_cloud_api_key()?);
+            }
+        }
+
+        let options = ProviderOptions {
+            model,
+            block_concurrency: args.block_concurrency as usize,
+            api_key,
+            cloud_key: args.cloud_key.clone(),
+            is_headless,
+        };
+        ProviderRegistry::global().resolve_config(provider_kind, &options)
     }
 }

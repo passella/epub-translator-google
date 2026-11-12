@@ -44,28 +44,44 @@ fn test_antigravity_model_name_configuration() {
     assert_eq!(custom_adapter.provider_name(), "antigravity");
 }
 
-#[test]
-fn test_fetch_available_models_with_non_existent_binary() {
+#[tokio::test]
+async fn test_fetch_available_models_with_non_existent_binary() {
     let dummy_path = Path::new("/tmp/non_existent_agy_binary_xyz123");
-    let models = AntigravityTranslatorAdapter::fetch_available_models(dummy_path);
+    let models = AntigravityTranslatorAdapter::fetch_available_models(dummy_path).await;
     assert!(models.is_empty());
 }
 
-#[test]
-fn test_interactive_prompter_prompt_model_with_provided_argument() {
-    let res_default = InteractivePrompter::prompt_model(Some("default".to_string())).unwrap();
+#[tokio::test]
+async fn test_interactive_prompter_prompt_model_with_provided_argument() {
+    let res_default = InteractivePrompter::prompt_model(Some("default".to_string()))
+        .await
+        .unwrap();
     assert_eq!(res_default, None);
 
     let res_system_default =
-        InteractivePrompter::prompt_model(Some("[Padrão do Sistema]".to_string())).unwrap();
+        InteractivePrompter::prompt_model(Some("[Padrão do Sistema]".to_string()))
+            .await
+            .unwrap();
     assert_eq!(res_system_default, None);
 
-    let res_empty = InteractivePrompter::prompt_model(Some("   ".to_string())).unwrap();
+    let res_empty = InteractivePrompter::prompt_model(Some("   ".to_string()))
+        .await
+        .unwrap();
     assert_eq!(res_empty, None);
 
-    let res_custom =
-        InteractivePrompter::prompt_model(Some("gemini-3.8-flash-high".to_string())).unwrap();
+    let res_custom = InteractivePrompter::prompt_model(Some("gemini-3.8-flash-high".to_string()))
+        .await
+        .unwrap();
     assert_eq!(res_custom, Some("gemini-3.8-flash-high".to_string()));
+}
+
+#[tokio::test]
+async fn test_model_discovery_port_with_adapter() {
+    use epub_translator_google::domain::ports::ModelDiscoveryPort;
+    let adapter =
+        AntigravityTranslatorAdapter::with_binary_path("/tmp/non_existent_agy_binary_xyz123", None);
+    let models = adapter.fetch_available_models().await;
+    assert!(models.is_empty());
 }
 
 #[test]

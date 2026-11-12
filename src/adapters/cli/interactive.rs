@@ -1,6 +1,7 @@
 use crate::adapters::translator::AntigravityTranslatorAdapter;
 use crate::domain::entities::{Language, TranslationProviderKind};
 use crate::domain::errors::AppError;
+use crate::domain::ports::ModelDiscoveryPort;
 use inquire::{InquireError, Password, Select, Text};
 use std::path::{Path, PathBuf};
 
@@ -124,7 +125,15 @@ impl InteractivePrompter {
         }
     }
 
-    pub fn prompt_model(provided: Option<String>) -> Result<Option<String>, AppError> {
+    pub async fn prompt_model(provided: Option<String>) -> Result<Option<String>, AppError> {
+        let adapter = AntigravityTranslatorAdapter::default();
+        Self::prompt_model_with_discovery(provided, &adapter).await
+    }
+
+    pub async fn prompt_model_with_discovery(
+        provided: Option<String>,
+        discovery: &dyn ModelDiscoveryPort,
+    ) -> Result<Option<String>, AppError> {
         if let Some(m) = provided {
             let trimmed = m.trim().to_string();
             if trimmed.is_empty()
@@ -136,8 +145,7 @@ impl InteractivePrompter {
             return Ok(Some(trimmed));
         }
 
-        let agy_path = AntigravityTranslatorAdapter::find_binary_path();
-        let models = AntigravityTranslatorAdapter::fetch_available_models(&agy_path);
+        let models = discovery.fetch_available_models().await;
 
         let default_option = "[Padrão do Sistema] (Recomendado)";
         let manual_option = "Outro (Digitar manualmente)...";

@@ -118,9 +118,20 @@ impl LogTimestamp {
 pub struct ErrorLogger;
 
 impl ErrorLogger {
+    pub fn resolve_logs_dir() -> PathBuf {
+        let app_subpath = Path::new("epub-translator-google").join("logs");
+        if let Some(state_dir) = dirs::state_dir() {
+            return state_dir.join(&app_subpath);
+        }
+        if let Some(data_local_dir) = dirs::data_local_dir() {
+            return data_local_dir.join(&app_subpath);
+        }
+        std::env::temp_dir().join(app_subpath)
+    }
+
     pub fn log_error(err: &AppError, ctx: &ExecutionContext) -> Result<PathBuf, std::io::Error> {
         let ts = LogTimestamp::now();
-        let logs_dir = PathBuf::from("logs");
+        let logs_dir = Self::resolve_logs_dir();
         let (mut file, file_path) = Self::create_log_file_atomic(&logs_dir, &ts.filename_base)?;
         let backtrace = Backtrace::force_capture();
         let report = Self::generate_report(err, ctx, &ts, &backtrace);
