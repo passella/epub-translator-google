@@ -1,7 +1,7 @@
 use crate::domain::entities::{ChapterLatency, EpubBook, ExecutionMetrics, Language};
 use crate::domain::errors::{AppError, ChapterTranslationError, TranslationError};
 use crate::domain::ports::{CachePort, EpubPort, ProgressReporterPort, TranslatorPort};
-use crate::domain::services::XhtmlValidator;
+use crate::domain::services::{XhtmlConformance, XhtmlValidator};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -132,7 +132,9 @@ impl TranslateBookUseCase {
                     .await?;
 
                 let valid_cached = match cached_translation.filter(|c| !c.trim().is_empty()) {
-                    Some(cached) => match XhtmlValidator::heal_and_validate(&cached) {
+                    Some(cached) => match XhtmlValidator::heal_and_validate(&cached)
+                        .map(|healed| XhtmlConformance::enforce(&trimmed_content, &healed))
+                    {
                         Ok(healed) => {
                             if healed != cached {
                                 let _ = cache_port
@@ -203,6 +205,8 @@ impl TranslateBookUseCase {
                                 source: TranslationError::XmlValidation(val_err.to_string()),
                             }))
                         })?;
+                        let validated_text =
+                            XhtmlConformance::enforce(&trimmed_content, &validated_text);
 
                         let was_auto = cur_lang.is_auto();
                         if was_auto {

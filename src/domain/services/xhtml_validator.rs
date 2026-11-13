@@ -1,4 +1,5 @@
 use super::xhtml_common::{extract_tag_name, is_valid_xml_entity, is_void_tag};
+use super::xhtml_conformance::XhtmlConformance;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use thiserror::Error;
@@ -98,7 +99,7 @@ impl XhtmlValidator {
 
         let quote_healed = Self::heal_attribute_quotes(trimmed);
         let entity_healed = Self::heal_naked_ampersands(&quote_healed);
-        Self::heal_tags(&entity_healed)
+        XhtmlConformance::sanitize(&Self::heal_tags(&entity_healed))
     }
 
     pub fn heal_and_validate(xml: &str) -> Result<String, XhtmlValidationError> {

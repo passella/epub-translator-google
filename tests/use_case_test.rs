@@ -676,3 +676,93 @@ async fn test_translate_book_use_case_concurrency_boundary_value_zero_clamps_to_
 
     let _ = fs::remove_file(&db_path);
 }
+
+struct IdShiftingTranslator;
+
+#[async_trait]
+impl TranslatorPort for IdShiftingTranslator {
+    async fn translate_html(
+        &self,
+        html: &str,
+        _source_lang: &Language,
+        _target_lang: &Language,
+    ) -> Result<TranslationResult, TranslationError> {
+        Ok(TranslationResult {
+            translated_text: html.replace("p119", "p120").replace("Hello", "Olá"),
+            detected_source: Some(Language::new("en")),
+        })
+    }
+
+    async fn translate_batch(
+        &self,
+        texts: &[String],
+        source_lang: &Language,
+        target_lang: &Language,
+    ) -> Result<Vec<TranslationResult>, TranslationError> {
+        let mut results = Vec::new();
+        for text in texts {
+            results.push(self.translate_html(text, source_lang, target_lang).await?);
+        }
+        Ok(results)
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "id-shifting-translator"
+    }
+}
+
+#[tokio::test]
+async fn test_translate_book_use_case_restores_original_ids_after_translation() {
+    let db_path = std::env::temp_dir().join("test_use_case_id_restore_cache.db");
+    let _ = fs::remove_file(&db_path);
+    let cache_adapter = Arc::new(SqliteCacheAdapter::new(&db_path).unwrap());
+
+    let book = EpubBook {
+        metadata: EpubMetadata {
+            title: Some("Book".to_string()),
+            language: Some(Language::new("en")),
+            creator: None,
+            identifier: None,
+            publisher: None,
+        },
+        chapters: vec![EpubChapter {
+            path: "OEBPS/ch022.xhtml".to_string(),
+            content: r#"<body><p id="p119">Hello</p><p id="p120">World</p></body>"#.to_string(),
+            media_type: "application/xhtml+xml".to_string(),
+        }],
+        resources: Vec::new(),
+        raw_container_xml: None,
+        raw_opf_content: None,
+        opf_path: "OEBPS/content.opf".to_string(),
+    };
+    let epub_port = Arc::new(MockEpubPort {
+        book: Mutex::new(book),
+        written_book: Mutex::new(None),
+    });
+
+    let use_case = TranslateBookUseCase::new(
+        epub_port.clone(),
+        Arc::new(IdShiftingTranslator),
+        cache_adapter,
+        None,
+    );
+
+    for _ in 0..2 {
+        use_case
+            .execute(
+                Path::new("in.epub"),
+                Path::new("out.epub"),
+                &Language::new("en"),
+                &Language::new("pt-BR"),
+            )
+            .await
+            .unwrap();
+        let written = epub_port.written_book.lock().await;
+        assert_eq!(
+            written.as_ref().unwrap().chapters[0].content,
+            r#"<body><p id="p119">Olá</p><p id="p120">World</p></body>"#
+        );
+    }
+
+    let _ = fs::remove_file(&db_path);
+}

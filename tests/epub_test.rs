@@ -301,3 +301,64 @@ fn test_update_xml_tag_handles_empty_self_closing_tag() {
     let updated = update_xml_tag(opf_xml, "dc:language", "pt-BR");
     assert!(updated.contains(r#"<dc:language>pt-BR</dc:language>"#));
 }
+
+fn create_epub_with_chapter(file_path: &std::path::Path, chapter_html: &str) {
+    let file = File::create(file_path).unwrap();
+    let mut zip = ZipWriter::new(BufWriter::new(file));
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    zip.start_file("mimetype", stored).unwrap();
+    zip.write_all(b"application/epub+zip").unwrap();
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+    zip.start_file("META-INF/container.xml", deflated).unwrap();
+    zip.write_all(br#"<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#).unwrap();
+    zip.start_file("content.opf", deflated).unwrap();
+    zip.write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>T</dc:title></metadata><manifest><item id="c1" href="ch022.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>"#).unwrap();
+    zip.start_file("ch022.xhtml", deflated).unwrap();
+    zip.write_all(chapter_html.as_bytes()).unwrap();
+    zip.finish().unwrap();
+}
+
+#[tokio::test]
+async fn test_zip_epub_verify_detects_duplicate_ids_and_non_integer_img_dimensions() {
+    let epub_path = std::env::temp_dir().join("test_verify_conformance_violations.epub");
+    create_epub_with_chapter(
+        &epub_path,
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="p120">a</p><p id="p120">b</p><img src="i.png" width="100%"/></body></html>"#,
+    );
+
+    let report = ZipEpubAdapter::new().verify_epub(&epub_path).await.unwrap();
+
+    assert!(!report.is_valid);
+    assert_eq!(report.total_xhtml_files, 1);
+    assert_eq!(report.valid_xhtml_files, 0);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.contains("ch022.xhtml") && e.contains("duplicate id 'p120'"))
+    );
+    assert!(report.errors.iter().any(|e| e.contains("width=\"100%\"")));
+
+    let _ = fs::remove_file(epub_path);
+}
+
+#[tokio::test]
+async fn test_zip_epub_write_sanitizes_conformance_violations() {
+    let input_path = std::env::temp_dir().join("test_conformance_heal_in.epub");
+    let output_path = std::env::temp_dir().join("test_conformance_heal_out.epub");
+    create_epub_with_chapter(
+        &input_path,
+        r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p id="p120">a</p><p id="p120">b</p><img src="i.png" width="100%"/></body></html>"#,
+    );
+
+    let adapter = ZipEpubAdapter::new();
+    let book = adapter.read_epub(&input_path).await.unwrap();
+    adapter.write_epub(&book, &output_path).await.unwrap();
+    let report = adapter.verify_epub(&output_path).await.unwrap();
+
+    assert!(report.is_valid, "{:?}", report.errors);
+    assert_eq!(report.valid_xhtml_files, 1);
+
+    let _ = fs::remove_file(input_path);
+    let _ = fs::remove_file(output_path);
+}

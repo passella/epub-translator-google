@@ -3,7 +3,7 @@ use crate::domain::entities::{
 };
 use crate::domain::errors::EpubError;
 use crate::domain::ports::EpubPort;
-use crate::domain::services::XhtmlValidator;
+use crate::domain::services::{XhtmlConformance, XhtmlValidator};
 use async_trait::async_trait;
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
@@ -382,7 +382,17 @@ impl ZipEpubAdapter {
                             errors.push(format!("XHTML file '{name}' has 0 bytes or is empty"));
                         } else {
                             match XhtmlValidator::validate(&content) {
-                                Ok(()) => valid_xhtml_files += 1,
+                                Ok(()) => {
+                                    let issues = XhtmlConformance::audit(&content);
+                                    if issues.is_empty() {
+                                        valid_xhtml_files += 1;
+                                    }
+                                    errors.extend(issues.into_iter().map(|issue| {
+                                        format!(
+                                            "XHTML file '{name}' violates EPUB conformance: {issue}"
+                                        )
+                                    }));
+                                }
                                 Err(e) => {
                                     errors.push(format!(
                                         "XHTML file '{name}' is not well-formed XML: {e}"
