@@ -8,7 +8,7 @@ license = "MIT"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.13.5", features = ["json", "stream", "form"] }
 clap = { version = "4", features = ["derive"] }
-rusqlite = { version = "0.42.0", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled"] }
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 quick-xml = "0.42.0"
 thiserror = "2"
