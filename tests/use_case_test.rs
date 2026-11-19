@@ -532,10 +532,10 @@ async fn test_translate_book_use_case_preserves_deterministic_chapter_order() {
     let final_book = written.as_ref().unwrap();
 
     assert_eq!(final_book.chapters.len(), chapter_count);
-    for i in 0..chapter_count {
-        assert_eq!(final_book.chapters[i].path, format!("OEBPS/ch{i}.xhtml"));
+    for (i, chapter) in final_book.chapters.iter().enumerate() {
+        assert_eq!(chapter.path, format!("OEBPS/ch{i}.xhtml"));
         assert_eq!(
-            final_book.chapters[i].content,
+            chapter.content,
             format!("<translated><p>Chapter {i} distinct body</p></translated>")
         );
     }
