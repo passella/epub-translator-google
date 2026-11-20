@@ -31,12 +31,22 @@ fn unique_temp_path(prefix: &str, ext: &str) -> PathBuf {
 
 #[cfg(unix)]
 fn create_mock_script(content: &str, name: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
     let path = unique_temp_path(name, "sh");
-    fs::write(&path, content).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(&path)
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(10));
     path
 }
 
@@ -211,9 +221,43 @@ async fn test_antigravity_timeout_and_kill_on_drop() {
 
     match res {
         Err(TranslationError::ProcessDetailed(details)) => {
-            assert!(details.message.contains("timed out"));
+            assert!(
+                details.message.contains("timed out after 0.120 seconds"),
+                "Unexpected ProcessDetailed message: {}",
+                details.message
+            );
         }
         other => panic!("Expected timeout ProcessDetailed error, got {other:?}"),
+    }
+
+    let zero_timeout_adapter = AntigravityTranslatorAdapter::with_binary_path(&script_path, None)
+        .with_execution_timeout(Duration::ZERO)
+        .with_retry_config(RetryConfig {
+            max_attempts: 1,
+            initial_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(10),
+            backoff_multiplier: 1.0,
+        });
+    assert_eq!(
+        zero_timeout_adapter.execution_timeout(),
+        Duration::from_millis(1)
+    );
+    let zero_res = zero_timeout_adapter
+        .translate_html(
+            "<p>Hello</p>",
+            &Language::new("en"),
+            &Language::new("pt-BR"),
+        )
+        .await;
+    match zero_res {
+        Err(TranslationError::ProcessDetailed(details)) => {
+            assert!(
+                details.message.contains("timed out after 0.001 seconds"),
+                "Unexpected ProcessDetailed message on clamped zero timeout: {}",
+                details.message
+            );
+        }
+        other => panic!("Expected clamped timeout ProcessDetailed error, got {other:?}"),
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;

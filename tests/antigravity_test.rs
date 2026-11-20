@@ -7,7 +7,6 @@ use epub_translator_google::domain::entities::Language;
 use epub_translator_google::domain::ports::{TranslationCachePort, TranslatorPort};
 use epub_translator_google::domain::services::XhtmlPartitioner;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -21,14 +20,24 @@ fn unique_temp_file(prefix: &str) -> PathBuf {
 }
 
 fn create_mock_script(content: &str, file_name: &str) -> PathBuf {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
     let id = SCRIPT_COUNTER.fetch_add(1, Ordering::SeqCst);
     let unique_name = format!("{}_{}_{}", std::process::id(), id, file_name);
     let script_path = std::env::temp_dir().join(unique_name);
-    fs::write(&script_path, content).unwrap();
-    let mut perms = fs::metadata(&script_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&script_path, perms).unwrap();
-    std::thread::sleep(Duration::from_millis(5));
+    {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o755)
+            .open(&script_path)
+            .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+    std::thread::sleep(Duration::from_millis(10));
     script_path
 }
 
@@ -192,7 +201,7 @@ async fn test_antigravity_retry_on_transient_failure_then_success() {
         let _ = fs::remove_file(&counter_file);
     }
     let script_content = format!(
-        "#!/bin/sh\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\nif [ \"$COUNT\" -eq 1 ]; then\necho \"500 Internal Server Error: Eligibility check failed\" >&2\nexit 1\nfi\necho '{{\"status\":\"ok\",\"response\":\"<p>Traduzido</p>\"}}'\nexit 0\n",
+        "#!/bin/sh\ncat > /dev/null\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\nif [ \"$COUNT\" -eq 1 ]; then\necho \"500 Internal Server Error: Eligibility check failed\" >&2\nexit 1\nfi\necho '{{\"status\":\"ok\",\"response\":\"<p>Traduzido</p>\"}}'\nexit 0\n",
         counter_file.display(),
         counter_file.display(),
         counter_file.display()
@@ -269,7 +278,7 @@ async fn test_antigravity_transient_error_exhausts_retries() {
         let _ = fs::remove_file(&counter_file);
     }
     let script_content = format!(
-        "#!/bin/sh\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\necho \"500 Internal Server Error\" >&2\nexit 1\n",
+        "#!/bin/sh\ncat > /dev/null\nCOUNT=0\nif [ -f \"{}\" ]; then\nCOUNT=$(cat \"{}\")\nfi\nCOUNT=$((COUNT + 1))\necho \"$COUNT\" > \"{}\"\necho \"500 Internal Server Error\" >&2\nexit 1\n",
         counter_file.display(),
         counter_file.display(),
         counter_file.display()
@@ -369,6 +378,7 @@ async fn test_antigravity_small_chapter_single_block_execution() {
 
     let script_content = format!(
         r#"#!/bin/sh
+cat > /dev/null
 COUNT=0
 if [ -f "{}" ]; then
   COUNT=$(cat "{}")
@@ -417,6 +427,7 @@ async fn test_antigravity_block_cache_instant_hit_bypasses_binary() {
 
     let script_content = format!(
         r#"#!/bin/sh
+cat > /dev/null
 COUNT=0
 if [ -f "{}" ]; then
   COUNT=$(cat "{}")

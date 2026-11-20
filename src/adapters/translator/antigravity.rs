@@ -244,13 +244,27 @@ impl AntigravityTranslatorAdapter {
             return cached_models.clone();
         }
 
-        let cmd_future = Command::new(binary_path)
-            .arg("models")
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output();
-
-        let output = match tokio::time::timeout(Duration::from_secs(5), cmd_future).await {
+        let output = match tokio::time::timeout(Duration::from_secs(5), async {
+            let mut spawn_attempt = 0usize;
+            loop {
+                match Command::new(binary_path)
+                    .arg("models")
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+                {
+                    Ok(out) => break Ok(out),
+                    Err(e) if e.raw_os_error() == Some(26) && spawn_attempt < 10 => {
+                        spawn_attempt += 1;
+                        sleep(Duration::from_millis(5 * spawn_attempt as u64)).await;
+                    }
+                    Err(e) => break Err(e),
+                }
+            }
+        })
+        .await
+        {
             Ok(Ok(out)) => out,
             _ => return Vec::new(),
         };
@@ -348,57 +362,71 @@ impl AntigravityTranslatorAdapter {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let mut child = cmd.spawn().map_err(|e| {
-            let is_transient = matches!(
-                e.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::TimedOut
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::Interrupted
-            ) || e.raw_os_error() == Some(26);
-            (
-                TranslationError::ProcessDetailed(Box::new(ProcessErrorDetails {
-                    command: self.binary_path.display().to_string(),
-                    args: cmd_args.to_vec(),
-                    io_mode: "stdin (streaming pipe)".to_string(),
-                    exit_code: None,
-                    os_error_code: e.raw_os_error(),
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    message: format!("Failed to spawn agy CLI: {e}"),
-                    location: crate::here!(),
-                })),
-                is_transient,
-            )
-        })?;
+        let mut child = {
+            let mut spawn_attempt = 0usize;
+            loop {
+                match cmd.spawn() {
+                    Ok(c) => break c,
+                    Err(e) if e.raw_os_error() == Some(26) && spawn_attempt < 10 => {
+                        spawn_attempt += 1;
+                        sleep(Duration::from_millis(5 * spawn_attempt as u64)).await;
+                    }
+                    Err(e) => {
+                        let is_transient = matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::TimedOut
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::Interrupted
+                        ) || e.raw_os_error() == Some(26);
+                        return Err((
+                            TranslationError::ProcessDetailed(Box::new(ProcessErrorDetails {
+                                command: self.binary_path.display().to_string(),
+                                args: cmd_args.to_vec(),
+                                io_mode: "stdin (streaming pipe)".to_string(),
+                                exit_code: None,
+                                os_error_code: e.raw_os_error(),
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                message: format!("Failed to spawn agy CLI: {e}"),
+                                location: crate::here!(),
+                            })),
+                            is_transient,
+                        ));
+                    }
+                }
+            }
+        };
 
         let binary_display = self.binary_path.display().to_string();
         let timeout_duration = self.execution_timeout;
         let io_future = async {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(prompt.as_bytes()).await.map_err(|e| {
-                    let is_transient = matches!(
-                        e.kind(),
-                        std::io::ErrorKind::BrokenPipe
-                            | std::io::ErrorKind::ConnectionReset
-                            | std::io::ErrorKind::TimedOut
-                    );
-                    (
-                        TranslationError::ProcessDetailed(Box::new(ProcessErrorDetails {
-                            command: binary_display.clone(),
-                            args: cmd_args.to_vec(),
-                            io_mode: "stdin (streaming pipe)".to_string(),
-                            exit_code: None,
-                            os_error_code: e.raw_os_error(),
-                            stdout: String::new(),
-                            stderr: String::new(),
-                            message: format!("Failed to write prompt to agy stdin: {e}"),
-                            location: crate::here!(),
-                        })),
-                        is_transient,
-                    )
-                })?;
+                match stdin.write_all(prompt.as_bytes()).await {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                    Err(e) => {
+                        let is_transient = matches!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::TimedOut
+                        );
+                        return Err((
+                            TranslationError::ProcessDetailed(Box::new(ProcessErrorDetails {
+                                command: binary_display.clone(),
+                                args: cmd_args.to_vec(),
+                                io_mode: "stdin (streaming pipe)".to_string(),
+                                exit_code: None,
+                                os_error_code: e.raw_os_error(),
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                message: format!("Failed to write prompt to agy stdin: {e}"),
+                                location: crate::here!(),
+                            })),
+                            is_transient,
+                        ));
+                    }
+                }
             }
 
             child.wait_with_output().await.map_err(|e| {
@@ -432,8 +460,8 @@ impl AntigravityTranslatorAdapter {
                         stdout: String::new(),
                         stderr: String::new(),
                         message: format!(
-                            "agy CLI timed out after {} seconds",
-                            timeout_duration.as_secs()
+                            "agy CLI timed out after {:.3} seconds",
+                            timeout_duration.as_secs_f64()
                         ),
                         location: crate::here!(),
                     })),

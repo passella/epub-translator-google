@@ -55,8 +55,9 @@ jobs:
           echo "tag=${EXPECTED_TAG}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # 1.99.0
         with:
+          toolchain: 1.99.0
           components: rustfmt, clippy
 
       - name: Check formatting
@@ -104,8 +105,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # 1.99.0
         with:
+          toolchain: 1.99.0
           targets: ${{ matrix.target }}
 
       - name: Build static musl release binary and package assets
