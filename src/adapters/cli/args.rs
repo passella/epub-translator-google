@@ -27,7 +27,7 @@ pub enum CliCommand {
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "epub-translator-google")]
-#[command(version = "0.1.0")]
+#[command(version)]
 #[command(
     about = "Tradutor profissional de e-books EPUB com Google Translate e Google Antigravity"
 )]
