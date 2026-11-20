@@ -1,4 +1,4 @@
-use super::xhtml_common::{extract_tag_name, find_tag_closing_bracket};
+use super::xhtml_common::{extract_tag_name, find_tag_closing_bracket, is_valid_xml_entity};
 use std::borrow::Cow;
 
 const SKIPPED_MARKUP: [(&str, &str); 5] = [
@@ -121,7 +121,7 @@ pub fn parse_attributes(raw: &str) -> Vec<TagAttribute<'_>> {
     let (_, mut rest, _) = split_tag(raw);
     let mut attributes = Vec::new();
     loop {
-        rest = rest.trim_start();
+        rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '/');
         if rest.is_empty() {
             return attributes;
         }
@@ -143,13 +143,37 @@ pub fn parse_attributes(raw: &str) -> Vec<TagAttribute<'_>> {
     }
 }
 
+fn push_escaped_attribute_value(value: &str, quote: char, out: &mut String) {
+    let mut last = 0;
+    for (idx, ch) in value.char_indices() {
+        let escaped = match ch {
+            '<' => Some("&lt;"),
+            '>' => Some("&gt;"),
+            '"' if quote == '"' => Some("&quot;"),
+            '\'' if quote == '\'' => Some("&apos;"),
+            '&' if !is_valid_xml_entity(value.get(idx..).unwrap_or("")) => Some("&amp;"),
+            _ => None,
+        };
+        if let Some(replacement) = escaped {
+            if let Some(chunk) = value.get(last..idx) {
+                out.push_str(chunk);
+            }
+            out.push_str(replacement);
+            last = idx + ch.len_utf8();
+        }
+    }
+    if let Some(tail) = value.get(last..) {
+        out.push_str(tail);
+    }
+}
+
 pub fn render_tag(raw: &str, attributes: &[TagAttribute<'_>]) -> String {
     let (name, _, self_closing) = split_tag(raw);
     let mut out = String::with_capacity(raw.len() + 32);
     out.push('<');
     out.push_str(name);
     for attribute in attributes {
-        let quote = if attribute.value.contains('"') {
+        let quote = if attribute.value.contains('"') && !attribute.value.contains('\'') {
             '\''
         } else {
             '"'
@@ -158,7 +182,7 @@ pub fn render_tag(raw: &str, attributes: &[TagAttribute<'_>]) -> String {
         out.push_str(attribute.name);
         out.push('=');
         out.push(quote);
-        out.push_str(&attribute.value);
+        push_escaped_attribute_value(&attribute.value, quote, &mut out);
         out.push(quote);
     }
     out.push_str(if self_closing { " />" } else { ">" });
@@ -174,11 +198,15 @@ where
     for tag in start_tags(xml) {
         let attributes = parse_attributes(tag.raw);
         if let Some(rewritten) = transform(&tag, attributes) {
-            out.push_str(&xml[last..tag.start]);
+            if let Some(chunk) = xml.get(last..tag.start) {
+                out.push_str(chunk);
+            }
             out.push_str(&render_tag(tag.raw, &rewritten));
             last = tag.end;
         }
     }
-    out.push_str(&xml[last..]);
+    if let Some(tail) = xml.get(last..) {
+        out.push_str(tail);
+    }
     out
 }

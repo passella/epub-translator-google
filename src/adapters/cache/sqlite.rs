@@ -4,8 +4,11 @@ use crate::domain::ports::TranslationCachePort;
 use async_trait::async_trait;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+pub const MAX_CACHE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 
 pub struct SqliteCacheAdapter {
     conn: Arc<Mutex<Connection>>,
@@ -14,7 +17,48 @@ pub struct SqliteCacheAdapter {
 pub use SqliteCacheAdapter as SqliteTranslationCacheAdapter;
 
 impl SqliteCacheAdapter {
+    fn is_in_memory_db(db_path: &Path) -> bool {
+        let s = db_path.to_string_lossy();
+        s.is_empty() || s == ":memory:" || s.starts_with("file::memory:")
+    }
+
+    #[cfg(unix)]
+    fn precreate_secure_db_file(db_path: &Path) {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+        if !Self::is_in_memory_db(db_path) && !db_path.exists() {
+            let _ = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(db_path);
+        }
+    }
+
+    #[cfg(unix)]
+    fn enforce_db_permissions(db_path: &Path) -> Result<(), CacheError> {
+        use std::os::unix::fs::PermissionsExt;
+        if Self::is_in_memory_db(db_path) {
+            return Ok(());
+        }
+        std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+            CacheError::Database(format!("Failed to set 0600 permissions on SQLite DB: {e}"))
+        })?;
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = std::path::PathBuf::from(format!("{}{}", db_path.display(), suffix));
+            if sidecar.exists() {
+                let _ = std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+        Ok(())
+    }
+
     pub fn new(db_path: impl AsRef<Path>) -> Result<Self, CacheError> {
+        let db_path = db_path.as_ref();
+        #[cfg(unix)]
+        Self::precreate_secure_db_file(db_path);
+
         let conn = Connection::open(db_path)
             .map_err(|e| CacheError::Database(format!("Failed to open SQLite database: {e}")))?;
 
@@ -49,9 +93,33 @@ impl SqliteCacheAdapter {
         )
         .map_err(|e| CacheError::Database(format!("Failed to initialize database tables: {e}")))?;
 
+        #[cfg(unix)]
+        Self::enforce_db_permissions(db_path)?;
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
+    }
+
+    pub fn decompress_zstd_with_limit(bytes: &[u8], max_bytes: u64) -> Result<Vec<u8>, CacheError> {
+        let decoder = zstd::stream::Decoder::new(bytes).map_err(|e| {
+            CacheError::Serialization(format!(
+                "Failed to initialize zstd decoder for cache payload: {e}"
+            ))
+        })?;
+        let mut decompressed = Vec::new();
+        decoder
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut decompressed)
+            .map_err(|e| {
+                CacheError::Serialization(format!("Failed to decompress zstd cache payload: {e}"))
+            })?;
+        if decompressed.len() as u64 > max_bytes {
+            return Err(CacheError::Serialization(format!(
+                "Decompressed cache payload exceeds maximum allowed size of {max_bytes} bytes"
+            )));
+        }
+        Ok(decompressed)
     }
 
     pub async fn purge_corrupted_entries(&self) -> Result<usize, CacheError> {
@@ -152,11 +220,8 @@ impl SqliteCacheAdapter {
                         }
                         const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
                         if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
-                            let decompressed = zstd::decode_all(&bytes[..]).map_err(|e| {
-                                CacheError::Serialization(format!(
-                                    "Failed to decompress zstd cache payload: {e}"
-                                ))
-                            })?;
+                            let decompressed =
+                                Self::decompress_zstd_with_limit(&bytes, MAX_CACHE_ENTRY_BYTES)?;
                             let text = String::from_utf8(decompressed).map_err(|e| {
                                 CacheError::Serialization(format!(
                                     "Invalid UTF-8 in decompressed cache payload: {e}"
@@ -323,9 +388,9 @@ impl TranslationCachePort for SqliteCacheAdapter {
         let conn = Arc::clone(&self.conn);
         let provider = provider.to_string();
         let target_lang = target_lang.to_string();
-        let total_chapters = metrics.total_chapters as i64;
-        let cache_hits = metrics.cache_hits as i64;
-        let cache_misses = metrics.cache_misses as i64;
+        let total_chapters = i64::try_from(metrics.total_chapters).unwrap_or(i64::MAX);
+        let cache_hits = i64::try_from(metrics.cache_hits).unwrap_or(i64::MAX);
+        let cache_misses = i64::try_from(metrics.cache_misses).unwrap_or(i64::MAX);
         let hit_ratio = metrics.cache_hit_ratio();
         let avg_latency = metrics.avg_provider_latency().as_secs_f64() * 1000.0;
         let total_duration = metrics.total_elapsed.as_secs_f64();
@@ -379,16 +444,17 @@ impl TranslationCachePort for SqliteCacheAdapter {
                 )
                 .map_err(|e| CacheError::Database(format!("Failed to prepare select metrics query: {e}")))?;
 
+            let sql_limit = i64::try_from(limit).unwrap_or(i64::MAX);
             let rows = stmt
-                .query_map(params![limit as i64], |row| {
+                .query_map(params![sql_limit], |row| {
                     Ok(ExecutionMetricsRecord {
                         id: row.get(0)?,
                         timestamp: row.get(1)?,
                         provider: row.get(2)?,
                         target_lang: row.get(3)?,
-                        total_chapters: row.get::<_, i64>(4)? as usize,
-                        cache_hits: row.get::<_, i64>(5)? as usize,
-                        cache_misses: row.get::<_, i64>(6)? as usize,
+                        total_chapters: usize::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
+                        cache_hits: usize::try_from(row.get::<_, i64>(5)?).unwrap_or(0),
+                        cache_misses: usize::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
                         hit_ratio_pct: row.get(7)?,
                         avg_latency_ms: row.get(8)?,
                         total_duration_secs: row.get(9)?,

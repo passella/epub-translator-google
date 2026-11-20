@@ -2,7 +2,7 @@ use crate::domain::errors::{AppError, HttpErrorDetails, ProcessErrorDetails, Tra
 use chrono::{Datelike, Local, Timelike, Utc};
 use std::backtrace::Backtrace;
 use std::error::Error;
-use std::fs::{File, OpenOptions, create_dir_all};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -67,21 +67,103 @@ impl LogTimestamp {
 pub struct ErrorLogger;
 
 impl ErrorLogger {
+    fn current_user_discriminator() -> String {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if let Ok(meta) = std::fs::metadata("/proc/self") {
+                return meta.uid().to_string();
+            }
+            if let Ok(uid) = std::env::var("UID") {
+                let trimmed = uid.trim();
+                if !trimmed.is_empty() {
+                    return Self::sanitize_path_component(trimmed);
+                }
+            }
+        }
+        if let Ok(user) = std::env::var("USER").or_else(|_| std::env::var("USERNAME")) {
+            let trimmed = user.trim();
+            if !trimmed.is_empty() {
+                return Self::sanitize_path_component(trimmed);
+            }
+        }
+        format!("pid-{}", std::process::id())
+    }
+
+    fn sanitize_path_component(input: &str) -> String {
+        let cleaned: String = input
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+            .collect();
+        if cleaned.is_empty() {
+            format!("pid-{}", std::process::id())
+        } else {
+            cleaned
+        }
+    }
+
+    fn ensure_secure_dir(dir: &Path) -> Result<(), std::io::Error> {
+        let mut builder = DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            builder.mode(0o700);
+            builder.create(dir)?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        #[cfg(not(unix))]
+        {
+            builder.create(dir)?;
+        }
+        Ok(())
+    }
+
     pub fn resolve_logs_dir() -> PathBuf {
+        Self::resolve_logs_dir_with(dirs::state_dir(), dirs::data_local_dir())
+    }
+
+    pub fn resolve_logs_dir_with(
+        state_dir: Option<PathBuf>,
+        data_local_dir: Option<PathBuf>,
+    ) -> PathBuf {
         let app_subpath = Path::new("epub-translator-google").join("logs");
-        if let Some(state_dir) = dirs::state_dir() {
-            return state_dir.join(&app_subpath);
+        if let Some(dir) = state_dir {
+            return dir.join(&app_subpath);
         }
-        if let Some(data_local_dir) = dirs::data_local_dir() {
-            return data_local_dir.join(&app_subpath);
+        if let Some(dir) = data_local_dir {
+            return dir.join(&app_subpath);
         }
-        std::env::temp_dir().join(app_subpath)
+        let uid = Self::current_user_discriminator();
+        let fallback_root = std::env::temp_dir().join(format!("epub-translator-google-{uid}"));
+        let logs_dir = fallback_root.join("logs");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = Self::ensure_secure_dir(&logs_dir);
+            let _ =
+                std::fs::set_permissions(&fallback_root, std::fs::Permissions::from_mode(0o700));
+            let _ = std::fs::set_permissions(&logs_dir, std::fs::Permissions::from_mode(0o700));
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = Self::ensure_secure_dir(&logs_dir);
+        }
+        logs_dir
     }
 
     pub fn log_error(err: &AppError, ctx: &ExecutionContext) -> Result<PathBuf, std::io::Error> {
-        let ts = LogTimestamp::now();
         let logs_dir = Self::resolve_logs_dir();
-        let (mut file, file_path) = Self::create_log_file_atomic(&logs_dir, &ts.filename_base)?;
+        Self::log_error_to_dir(&logs_dir, err, ctx)
+    }
+
+    pub fn log_error_to_dir(
+        logs_dir: &Path,
+        err: &AppError,
+        ctx: &ExecutionContext,
+    ) -> Result<PathBuf, std::io::Error> {
+        let ts = LogTimestamp::now();
+        let (mut file, file_path) = Self::create_log_file_atomic(logs_dir, &ts.filename_base)?;
         let backtrace = Backtrace::force_capture();
         let report = Self::generate_report(err, ctx, &ts, &backtrace);
         file.write_all(report.as_bytes())?;
@@ -89,28 +171,33 @@ impl ErrorLogger {
         Ok(file_path)
     }
 
+    fn open_secure_new_file(path: &Path) -> Result<File, std::io::Error> {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        opts.open(path)
+    }
+
     pub fn create_log_file_atomic(
         base_dir: &Path,
         base_name: &str,
     ) -> Result<(File, PathBuf), std::io::Error> {
-        create_dir_all(base_dir)?;
+        Self::ensure_secure_dir(base_dir)?;
         let first_candidate = base_dir.join(format!("{base_name}.log"));
-        if let Ok(file) = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&first_candidate)
-        {
-            return Ok((file, first_candidate));
+        match Self::open_secure_new_file(&first_candidate) {
+            Ok(file) => return Ok((file, first_candidate)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
         }
 
         let mut counter = 1;
         loop {
             let next_candidate = base_dir.join(format!("{base_name}_{counter}.log"));
-            match OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&next_candidate)
-            {
+            match Self::open_secure_new_file(&next_candidate) {
                 Ok(file) => return Ok((file, next_candidate)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     counter += 1;
@@ -118,6 +205,94 @@ impl ErrorLogger {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    fn is_sensitive_header(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "set-cookie" | "authorization" | "x-goog-api-key" | "proxy-authorization" | "cookie"
+        )
+    }
+
+    pub fn sanitize_terminal_text(input: &str) -> String {
+        Self::sanitize_control_and_ansi_impl(input, false)
+    }
+
+    pub fn sanitize_log_multiline(input: &str) -> String {
+        Self::sanitize_control_and_ansi_impl(input, true)
+    }
+
+    fn sanitize_control_and_ansi_impl(input: &str, allow_newlines_and_tabs: bool) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                match chars.peek().copied() {
+                    Some('[') => {
+                        chars.next();
+                        for c in chars.by_ref() {
+                            if ('@'..='~').contains(&c) {
+                                break;
+                            }
+                        }
+                    }
+                    Some(']') | Some('P') | Some('X') | Some('^') | Some('_') => {
+                        chars.next();
+                        while let Some(c) = chars.next() {
+                            if c == '\x07' || c == '\u{009c}' {
+                                break;
+                            }
+                            if c == '\x1b' && chars.peek() == Some(&'\\') {
+                                chars.next();
+                                break;
+                            }
+                        }
+                    }
+                    Some('(' | ')' | '*' | '+' | '-' | '.' | '/') => {
+                        chars.next();
+                        chars.next();
+                    }
+                    Some(next_ch) if (' '..='~').contains(&next_ch) => {
+                        chars.next();
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if ch == '\u{009b}' {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == '\u{009d}'
+                || ch == '\u{0090}'
+                || ch == '\u{0098}'
+                || ch == '\u{009e}'
+                || ch == '\u{009f}'
+            {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || c == '\u{009c}' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch.is_control() {
+                if allow_newlines_and_tabs && (ch == '\n' || ch == '\t') {
+                    out.push(ch);
+                }
+                continue;
+            }
+            out.push(ch);
+        }
+        out
     }
 
     fn generate_report(
@@ -182,10 +357,19 @@ impl ErrorLogger {
             "DATA/HORA:     {} ({})\n",
             ts.local_iso, ts.utc_iso
         ));
-        report.push_str(&format!("ARQUIVO/LINHA: {}\n", resolved_location));
+        report.push_str(&format!(
+            "ARQUIVO/LINHA: {}\n",
+            Self::sanitize_terminal_text(&resolved_location)
+        ));
         report.push_str(&format!("TIPO DO ERRO:  {}\n", error_type));
-        report.push_str(&format!("O QUE HOUVE:   {}\n", err));
-        report.push_str(&format!("POR QUE:       {}\n", category));
+        report.push_str(&format!(
+            "O QUE HOUVE:   {}\n",
+            Self::sanitize_terminal_text(&err.to_string())
+        ));
+        report.push_str(&format!(
+            "POR QUE:       {}\n",
+            Self::sanitize_terminal_text(&category)
+        ));
         report.push_str(
             "================================================================================\n\n",
         );
@@ -194,7 +378,7 @@ impl ErrorLogger {
         let input_display = ctx
             .input_path
             .as_ref()
-            .map(|p| p.display().to_string())
+            .map(|p| Self::sanitize_terminal_text(&p.display().to_string()))
             .unwrap_or_else(|| "N/A".to_string());
         report.push_str(&format!("Arquivo EPUB de Entrada: {}\n", input_display));
 
@@ -212,14 +396,15 @@ impl ErrorLogger {
         let output_display = ctx
             .output_path
             .as_ref()
-            .map(|p| p.display().to_string())
+            .map(|p| Self::sanitize_terminal_text(&p.display().to_string()))
             .unwrap_or_else(|| "N/A".to_string());
         report.push_str(&format!("Arquivo de Saída:        {}\n", output_display));
 
         if let Some((idx, path, size, _, _)) = chapter_info {
             report.push_str(&format!(
                 "Capítulo em Processo:    Índice #{} - {}\n",
-                idx, path
+                idx,
+                Self::sanitize_terminal_text(path)
             ));
             report.push_str(&format!(
                 "Tamanho do Capítulo:     {} bytes ({:.2} KB)\n",
@@ -232,34 +417,34 @@ impl ErrorLogger {
 
         report.push_str(&format!(
             "Idioma de Origem:        {}\n",
-            ctx.source_lang.as_deref().unwrap_or("N/A")
+            Self::sanitize_terminal_text(ctx.source_lang.as_deref().unwrap_or("N/A"))
         ));
         report.push_str(&format!(
             "Idioma de Destino:       {}\n",
-            ctx.target_lang.as_deref().unwrap_or("N/A")
+            Self::sanitize_terminal_text(ctx.target_lang.as_deref().unwrap_or("N/A"))
         ));
         report.push_str(&format!(
             "Provedor Selecionado:    {}\n",
-            ctx.provider.as_deref().unwrap_or("N/A")
+            Self::sanitize_terminal_text(ctx.provider.as_deref().unwrap_or("N/A"))
         ));
         report.push_str(&format!(
             "Modelo Selecionado:      {}\n",
-            ctx.model.as_deref().unwrap_or("[Padrão do Sistema]")
+            Self::sanitize_terminal_text(ctx.model.as_deref().unwrap_or("[Padrão do Sistema]"))
         ));
         report.push_str(&format!(
             "Banco de Cache:          {}\n\n",
             ctx.cache_db
                 .as_ref()
-                .map(|p| p.display().to_string())
+                .map(|p| Self::sanitize_terminal_text(&p.display().to_string()))
                 .unwrap_or_else(|| "N/A".to_string())
         ));
 
         report.push_str("=== 2. CADEIA CAUSAL DE ERROS (ERROR CHAIN) ===\n");
         let mut chain = Vec::new();
-        chain.push(err.to_string());
+        chain.push(Self::sanitize_terminal_text(&err.to_string()));
         let mut current: &dyn Error = err;
         while let Some(cause) = current.source() {
-            chain.push(cause.to_string());
+            chain.push(Self::sanitize_terminal_text(&cause.to_string()));
             current = cause;
         }
         for (depth, cause_msg) in chain.iter().enumerate() {
@@ -272,13 +457,25 @@ impl ErrorLogger {
         report.push('\n');
 
         report.push_str("=== 3. STACK TRACE COMPLETA (BACKTRACE) ===\n");
-        report.push_str(&format!("{backtrace}\n"));
+        let sanitized_backtrace = Self::sanitize_log_multiline(&backtrace.to_string());
+        report.push_str(&format!("{sanitized_backtrace}\n"));
 
         report.push_str("=== 4. SUBPROCESSO E SISTEMA OPERACIONAL ===\n");
         if let Some(proc) = process_details {
-            report.push_str(&format!("Comando Executado:       {}\n", proc.command));
-            report.push_str(&format!("Argumentos Passados:     {:?}\n", proc.args));
-            report.push_str(&format!("Modo de I/O:             {}\n", proc.io_mode));
+            report.push_str(&format!(
+                "Comando Executado:       {}\n",
+                Self::sanitize_terminal_text(&proc.command)
+            ));
+            let sanitized_args: Vec<String> = proc
+                .args
+                .iter()
+                .map(|a| Self::sanitize_terminal_text(a))
+                .collect();
+            report.push_str(&format!("Argumentos Passados:     {:?}\n", sanitized_args));
+            report.push_str(&format!(
+                "Modo de I/O:             {}\n",
+                Self::sanitize_terminal_text(&proc.io_mode)
+            ));
             report.push_str(&format!(
                 "Código de Saída (Exit):  {}\n",
                 proc.exit_code
@@ -291,25 +488,30 @@ impl ErrorLogger {
                     .map(|c| format!("{c} ({})", Self::errno_name(c)))
                     .unwrap_or_else(|| "N/A".to_string())
             ));
-            report.push_str(&format!("Local de Invocação:      {}\n", proc.location));
+            report.push_str(&format!(
+                "Local de Invocação:      {}\n",
+                Self::sanitize_terminal_text(&proc.location.to_string())
+            ));
             report.push_str("STDOUT Capturado:\n");
             report.push_str("--------------------------------------------------------------------------------\n");
-            if proc.stdout.is_empty() {
+            let sanitized_stdout = Self::sanitize_log_multiline(&proc.stdout);
+            if sanitized_stdout.is_empty() {
                 report.push_str("(vazio)\n");
             } else {
-                report.push_str(&proc.stdout);
-                if !proc.stdout.ends_with('\n') {
+                report.push_str(&sanitized_stdout);
+                if !sanitized_stdout.ends_with('\n') {
                     report.push('\n');
                 }
             }
             report.push_str("--------------------------------------------------------------------------------\n");
             report.push_str("STDERR Capturado:\n");
             report.push_str("--------------------------------------------------------------------------------\n");
-            if proc.stderr.is_empty() {
+            let sanitized_stderr = Self::sanitize_log_multiline(&proc.stderr);
+            if sanitized_stderr.is_empty() {
                 report.push_str("(vazio)\n");
             } else {
-                report.push_str(&proc.stderr);
-                if !proc.stderr.ends_with('\n') {
+                report.push_str(&sanitized_stderr);
+                if !sanitized_stderr.ends_with('\n') {
                     report.push('\n');
                 }
             }
@@ -324,7 +526,8 @@ impl ErrorLogger {
         if let Some(http) = http_details {
             report.push_str(&format!(
                 "Método e URL Exatos:     {} {}\n",
-                http.method, http.url
+                Self::sanitize_terminal_text(&http.method),
+                Self::sanitize_terminal_text(&http.url)
             ));
             report.push_str(&format!(
                 "Código de Status:        {} {}\n\n",
@@ -337,19 +540,18 @@ impl ErrorLogger {
             if http.request_headers.is_empty() {
                 report.push_str("(nenhum header registrado)\n");
             } else {
-                for (k, v) in &http.request_headers {
-                    report.push_str(&format!("{k}: {v}\n"));
-                }
+                Self::append_sanitized_headers(&mut report, &http.request_headers);
             }
             report.push_str("--------------------------------------------------------------------------------\n\n");
 
             report.push_str("Corpo da Requisição (Payload Enviado):\n");
             report.push_str("--------------------------------------------------------------------------------\n");
-            if http.request_body.is_empty() {
+            let sanitized_req_body = Self::sanitize_log_multiline(&http.request_body);
+            if sanitized_req_body.is_empty() {
                 report.push_str("(vazio)\n");
             } else {
-                report.push_str(&http.request_body);
-                if !http.request_body.ends_with('\n') {
+                report.push_str(&sanitized_req_body);
+                if !sanitized_req_body.ends_with('\n') {
                     report.push('\n');
                 }
             }
@@ -360,19 +562,18 @@ impl ErrorLogger {
             if http.response_headers.is_empty() {
                 report.push_str("(nenhum header retornado)\n");
             } else {
-                for (k, v) in &http.response_headers {
-                    report.push_str(&format!("{k}: {v}\n"));
-                }
+                Self::append_sanitized_headers(&mut report, &http.response_headers);
             }
             report.push_str("--------------------------------------------------------------------------------\n\n");
 
             report.push_str("Corpo da Resposta do Servidor:\n");
             report.push_str("--------------------------------------------------------------------------------\n");
-            if http.response_body.is_empty() {
+            let sanitized_resp_body = Self::sanitize_log_multiline(&http.response_body);
+            if sanitized_resp_body.is_empty() {
                 report.push_str("(vazio)\n");
             } else {
-                report.push_str(&http.response_body);
-                if !http.response_body.ends_with('\n') {
+                report.push_str(&sanitized_resp_body);
+                if !sanitized_resp_body.ends_with('\n') {
                     report.push('\n');
                 }
             }
@@ -386,9 +587,9 @@ impl ErrorLogger {
         report.push_str("=== 5. SNIPPET DO CAPÍTULO ===\n");
         if let Some((_, _, _, preview_start, preview_end)) = chapter_info {
             report.push_str("--- Início do Capítulo (primeiras 15 linhas) ---\n");
-            report.push_str(preview_start);
+            report.push_str(&Self::sanitize_log_multiline(preview_start));
             report.push_str("\n--- Fim do Capítulo (últimas 15 linhas) ---\n");
-            report.push_str(preview_end);
+            report.push_str(&Self::sanitize_log_multiline(preview_end));
             report.push_str("\n\n");
         } else {
             report
@@ -396,20 +597,43 @@ impl ErrorLogger {
         }
 
         report.push_str("=== 6. GUIA DE RESOLUÇÃO / TROUBLESHOOTING ===\n");
-        report.push_str(&format!("Diagnóstico da Causa Raiz: {}\n\n", diagnosis));
+        report.push_str(&format!(
+            "Diagnóstico da Causa Raiz: {}\n\n",
+            Self::sanitize_terminal_text(&diagnosis)
+        ));
         report.push_str("Ações Recomendadas para Humanos:\n");
         for (i, action) in human_actions.iter().enumerate() {
-            report.push_str(&format!("  {}. {}\n", i + 1, action));
+            report.push_str(&format!(
+                "  {}. {}\n",
+                i + 1,
+                Self::sanitize_terminal_text(action)
+            ));
         }
         report.push_str("\nAções Recomendadas para Agentes e IAs:\n");
         for (i, action) in ai_actions.iter().enumerate() {
-            report.push_str(&format!("  {}. {}\n", i + 1, action));
+            report.push_str(&format!(
+                "  {}. {}\n",
+                i + 1,
+                Self::sanitize_terminal_text(action)
+            ));
         }
         report.push_str(
             "================================================================================\n",
         );
 
         report
+    }
+
+    fn append_sanitized_headers(report: &mut String, headers: &[(String, String)]) {
+        for (k, v) in headers {
+            let safe_k = Self::sanitize_terminal_text(k);
+            let safe_v = if Self::is_sensitive_header(k) {
+                "[REDACTED]".to_string()
+            } else {
+                Self::sanitize_terminal_text(v)
+            };
+            report.push_str(&format!("{safe_k}: {safe_v}\n"));
+        }
     }
 
     fn http_status_reason(status: u16) -> &'static str {
@@ -430,7 +654,7 @@ impl ErrorLogger {
         }
     }
 
-    fn summarize_http_body(body: &str) -> String {
+    pub fn summarize_http_body(body: &str) -> String {
         let trimmed = body.trim();
         if trimmed.is_empty() {
             return "Sem detalhes no corpo da resposta".to_string();
@@ -441,10 +665,10 @@ impl ErrorLogger {
                 .pointer("/error/message")
                 .and_then(serde_json::Value::as_str)
             {
-                return msg.to_string();
+                return Self::sanitize_terminal_text(msg);
             }
             if let Some(msg) = json_val.get("message").and_then(serde_json::Value::as_str) {
-                return msg.to_string();
+                return Self::sanitize_terminal_text(msg);
             }
         }
 
@@ -454,7 +678,7 @@ impl ErrorLogger {
             let raw_p = &trimmed[start_p + 3..start_p + end_p];
             let cleaned = Self::clean_html_snippet(raw_p);
             if !cleaned.is_empty() {
-                return cleaned;
+                return Self::sanitize_terminal_text(&cleaned);
             }
         }
 
@@ -464,15 +688,18 @@ impl ErrorLogger {
             let raw_t = &trimmed[start_t + 7..start_t + end_t];
             let cleaned = Self::clean_html_snippet(raw_t);
             if !cleaned.is_empty() {
-                return cleaned;
+                return Self::sanitize_terminal_text(&cleaned);
             }
         }
 
-        let first_line = trimmed.lines().next().unwrap_or(trimmed).trim();
-        if first_line.len() > 120 {
-            format!("{}...", &first_line[..120])
+        let first_line =
+            Self::sanitize_terminal_text(trimmed.lines().next().unwrap_or(trimmed).trim());
+        let mut chars = first_line.chars();
+        let prefix: String = chars.by_ref().take(120).collect();
+        if chars.next().is_some() {
+            format!("{prefix}...")
         } else {
-            first_line.to_string()
+            prefix
         }
     }
 

@@ -10,6 +10,7 @@ use crate::domain::entities::{ExecutionMetricsRecord, Language, TranslationProvi
 use crate::domain::errors::{AppError, EpubError};
 use crate::domain::ports::{CachePort, EpubPort, ProgressReporterPort};
 use crate::domain::services::TranslateBookUseCase;
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -33,11 +34,23 @@ impl CliRunner {
         Ok(())
     }
 
+    pub fn sanitize_terminal_path(path: &Path) -> String {
+        ErrorLogger::sanitize_terminal_text(&path.display().to_string())
+    }
+
+    pub fn format_fatal_error_message(err: &AppError) -> String {
+        format!(
+            "Erro fatal durante a execução: {}",
+            ErrorLogger::sanitize_terminal_text(&err.to_string())
+        )
+    }
+
     pub async fn run_verify(path: &Path) -> Result<(), AppError> {
         let epub_adapter = ZipEpubAdapter::new();
         let report = epub_adapter.verify_epub(path).await?;
+        let safe_path = Self::sanitize_terminal_path(path);
         if report.is_valid {
-            println!("EPUB verification successful: {}", path.display());
+            println!("EPUB verification successful: {safe_path}");
             println!("  - OCF Mimetype: Valid (Stored, 20 bytes)");
             println!("  - container.xml: Valid");
             println!("  - OPF Package: Valid");
@@ -47,9 +60,9 @@ impl CliRunner {
             );
             Ok(())
         } else {
-            eprintln!("EPUB verification failed: {}", path.display());
+            eprintln!("EPUB verification failed: {safe_path}");
             for err in &report.errors {
-                eprintln!("  - {err}");
+                eprintln!("  - {}", ErrorLogger::sanitize_terminal_text(err));
             }
             eprintln!(
                 "Summary: {}/{} XHTML files valid",
@@ -87,17 +100,27 @@ impl CliRunner {
         Ok(())
     }
 
+    fn format_csv_cell(value: &str) -> String {
+        let neutralized = if value.starts_with(['=', '+', '-', '@', '\t', '\r', '\n']) {
+            Cow::Owned(format!("'{value}"))
+        } else {
+            Cow::Borrowed(value)
+        };
+        let escaped = neutralized.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    }
+
     pub fn format_history_csv(records: &[ExecutionMetricsRecord]) -> String {
         let mut out = String::from(
             "id,timestamp,provider,target_lang,total_chapters,cache_hits,cache_misses,hit_ratio_pct,avg_latency_ms,total_duration_secs\n",
         );
         for r in records {
             out.push_str(&format!(
-                "{},\"{}\",\"{}\",\"{}\",{},{},{},{:.1},{:.1},{:.2}\n",
+                "{},{},{},{},{},{},{},{:.1},{:.1},{:.2}\n",
                 r.id,
-                r.timestamp,
-                r.provider,
-                r.target_lang,
+                Self::format_csv_cell(&r.timestamp),
+                Self::format_csv_cell(&r.provider),
+                Self::format_csv_cell(&r.target_lang),
                 r.total_chapters,
                 r.cache_hits,
                 r.cache_misses,
@@ -131,9 +154,9 @@ impl CliRunner {
         for r in records {
             rows.push([
                 r.id.to_string(),
-                r.timestamp.clone(),
-                r.provider.clone(),
-                r.target_lang.clone(),
+                ErrorLogger::sanitize_terminal_text(&r.timestamp),
+                ErrorLogger::sanitize_terminal_text(&r.provider),
+                ErrorLogger::sanitize_terminal_text(&r.target_lang),
                 r.total_chapters.to_string(),
                 r.cache_hits.to_string(),
                 r.cache_misses.to_string(),
@@ -187,23 +210,35 @@ impl CliRunner {
                 eprintln!("\nOperação cancelada pelo usuário.");
             }
             other => {
-                eprintln!("\nErro fatal durante a execução: {other}");
+                eprintln!("\n{}", Self::format_fatal_error_message(other));
                 match ErrorLogger::log_error(other, ctx) {
                     Ok(log_path) => {
                         eprintln!(
                             "Relatório detalhado do erro gravado em: {}",
-                            log_path.display()
+                            Self::sanitize_terminal_path(&log_path)
                         );
                     }
                     Err(log_err) => {
-                        eprintln!("Falha ao gravar arquivo de log de erro: {log_err}");
+                        eprintln!(
+                            "Falha ao gravar arquivo de log de erro: {}",
+                            ErrorLogger::sanitize_terminal_text(&log_err.to_string())
+                        );
                     }
                 }
             }
         }
     }
 
+    fn warn_if_cli_api_key(args: &CliArgs) {
+        if args.api_key.is_some() || args.cloud_key.is_some() {
+            eprintln!(
+                "Aviso de segurança: passar --api-key ou --cloud-key diretamente na CLI expõe a chave na lista de processos. Recomenda-se usar a variável de ambiente GOOGLE_CLOUD_TRANSLATION_API_KEY ou GOOGLE_TRANSLATE_API_KEY."
+            );
+        }
+    }
+
     async fn execute_pipeline(args: CliArgs, ctx: &mut ExecutionContext) -> Result<(), AppError> {
+        Self::warn_if_cli_api_key(&args);
         ctx.cache_db = Some(args.db_cache.clone());
 
         let resolved_input = args
@@ -299,14 +334,14 @@ impl CliRunner {
 
         println!(
             "\nEPUB traduzido salvo com sucesso em: {}",
-            output_path.display()
+            Self::sanitize_terminal_path(&output_path)
         );
 
         println!("Executando validação de integridade pós-tradução...");
         let report = epub_adapter.verify_epub(&output_path).await?;
         if !report.is_valid {
             for err in &report.errors {
-                eprintln!("  - {err}");
+                eprintln!("  - {}", ErrorLogger::sanitize_terminal_text(err));
             }
             return Err(AppError::Epub(EpubError::VerificationFailed(format!(
                 "Translated EPUB failed post-translation integrity check with {} error(s)",

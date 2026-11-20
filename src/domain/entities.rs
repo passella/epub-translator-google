@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter, Result as FmtResult};
+use serde::{Deserialize, Serialize, Serializer};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 use std::ops::Deref;
 use std::str::FromStr;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Language(String);
@@ -87,16 +88,44 @@ impl FromStr for TranslationProviderKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+fn serialize_redacted_api_key<S>(_api_key: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str("[REDACTED]")
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderConfig {
     Antigravity {
         model: Option<String>,
         block_concurrency: Option<usize>,
     },
     GoogleCloud {
-        api_key: String,
+        #[serde(serialize_with = "serialize_redacted_api_key")]
+        api_key: Zeroizing<String>,
     },
     GoogleFree,
+}
+
+impl Debug for ProviderConfig {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Self::Antigravity {
+                model,
+                block_concurrency,
+            } => f
+                .debug_struct("Antigravity")
+                .field("model", model)
+                .field("block_concurrency", block_concurrency)
+                .finish(),
+            Self::GoogleCloud { .. } => f
+                .debug_struct("GoogleCloud")
+                .field("api_key", &"[REDACTED]")
+                .finish(),
+            Self::GoogleFree => f.write_str("GoogleFree"),
+        }
+    }
 }
 
 impl ProviderConfig {
@@ -123,7 +152,7 @@ impl ProviderConfig {
 
     pub fn google_cloud(api_key: impl Into<String>) -> Self {
         Self::GoogleCloud {
-            api_key: api_key.into(),
+            api_key: Zeroizing::new(api_key.into()),
         }
     }
 
@@ -139,7 +168,7 @@ impl ProviderConfig {
             },
             TranslationProviderKind::GoogleFree => Self::GoogleFree,
             TranslationProviderKind::GoogleCloud => Self::GoogleCloud {
-                api_key: api_key.unwrap_or_default(),
+                api_key: Zeroizing::new(api_key.unwrap_or_default()),
             },
         }
     }

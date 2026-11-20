@@ -1,3 +1,4 @@
+use super::xhtml_common::{extract_tag_name, find_tag_closing_bracket};
 use super::xhtml_tag::{TagAttribute, parse_attributes, rewrite_start_tags, start_tags};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -8,6 +9,9 @@ const IMAGE_DIMENSIONS: [&str; 2] = ["width", "height"];
 const IMAGE_TAG: &str = "img";
 const ID_ATTRIBUTE: &str = "id";
 const STYLE_ATTRIBUTE: &str = "style";
+const ACTIVE_TAGS: [&str; 4] = ["script", "iframe", "object", "embed"];
+const URI_ATTRIBUTES: [&str; 5] = ["href", "src", "action", "xlink:href", "formaction"];
+const ALLOWED_CSS_UNITS: [&str; 10] = ["px", "em", "rem", "%", "pt", "cm", "mm", "in", "vw", "vh"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConformanceIssue {
@@ -56,14 +60,15 @@ impl XhtmlConformance {
     }
 
     pub fn sanitize(xml: &str) -> String {
+        let stripped = Self::strip_active_elements(xml);
         let mut seen_ids: HashSet<Cow<'_, str>> = HashSet::new();
-        rewrite_start_tags(xml, |tag, attributes| {
+        rewrite_start_tags(&stripped, |tag, attributes| {
             let is_image = tag.name == IMAGE_TAG;
             let mut changed = false;
             let mut kept = Vec::with_capacity(attributes.len());
             let mut declarations = Vec::new();
             for attribute in attributes {
-                if attribute.is_named(ID_ATTRIBUTE) && !seen_ids.insert(attribute.value.clone()) {
+                if Self::should_drop_attribute(&attribute, &mut seen_ids) {
                     changed = true;
                 } else if is_image && Self::is_invalid_dimension(&attribute) {
                     changed = true;
@@ -109,6 +114,302 @@ impl XhtmlConformance {
         Self::sanitize(&Self::restore_structural_attributes(original, translated))
     }
 
+    fn local_tag_name(name: &str) -> &str {
+        name.rsplit(':').next().unwrap_or(name)
+    }
+
+    fn is_active_tag(name: &str) -> bool {
+        let local = Self::local_tag_name(name);
+        ACTIVE_TAGS.iter().any(|t| local.eq_ignore_ascii_case(t))
+    }
+
+    fn strip_active_elements(xml: &str) -> Cow<'_, str> {
+        let mut out: Option<String> = None;
+        let mut last_copied = 0usize;
+        let mut pos = 0usize;
+
+        while let Some(rel_open) = xml.get(pos..).and_then(|s| s.find('<')) {
+            let next_open = pos + rel_open;
+            let rest = xml.get(next_open..).unwrap_or("");
+
+            if rest.starts_with("<!--") {
+                pos = rest
+                    .find("-->")
+                    .map_or(xml.len(), |idx| next_open + idx + 3);
+                continue;
+            }
+            if rest.starts_with("<![CDATA[") {
+                pos = rest
+                    .find("]]>")
+                    .map_or(xml.len(), |idx| next_open + idx + 3);
+                continue;
+            }
+            if rest.starts_with("<?") {
+                pos = rest.find("?>").map_or(xml.len(), |idx| next_open + idx + 2);
+                continue;
+            }
+            if rest.starts_with("<!") {
+                pos = find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+                continue;
+            }
+            if rest.starts_with("</") {
+                let tag_name = extract_tag_name(rest);
+                let end =
+                    find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+                if Self::is_active_tag(&tag_name) {
+                    let buf = out.get_or_insert_with(|| String::with_capacity(xml.len()));
+                    if let Some(chunk) = xml.get(last_copied..next_open) {
+                        buf.push_str(chunk);
+                    }
+                    last_copied = end;
+                }
+                pos = end;
+                continue;
+            }
+
+            let tag_name = extract_tag_name(rest);
+            let open_end =
+                find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+            if !Self::is_active_tag(&tag_name) {
+                pos = open_end;
+                continue;
+            }
+
+            let buf = out.get_or_insert_with(|| String::with_capacity(xml.len()));
+            if let Some(chunk) = xml.get(last_copied..next_open) {
+                buf.push_str(chunk);
+            }
+
+            let open_tag = xml.get(next_open..open_end).unwrap_or("");
+            let is_self_closing = open_tag.trim_end().ends_with("/>");
+            let local = Self::local_tag_name(&tag_name);
+
+            let skip_end = if is_self_closing || local.eq_ignore_ascii_case("embed") {
+                open_end
+            } else if local.eq_ignore_ascii_case("script") {
+                Self::find_script_close(xml, open_end).unwrap_or(xml.len())
+            } else {
+                Self::find_paired_active_close(xml, open_end, local).unwrap_or(open_end)
+            };
+
+            last_copied = skip_end;
+            pos = skip_end;
+        }
+
+        match out {
+            Some(mut buf) => {
+                if let Some(tail) = xml.get(last_copied..) {
+                    buf.push_str(tail);
+                }
+                Cow::Owned(buf)
+            }
+            None => Cow::Borrowed(xml),
+        }
+    }
+
+    fn find_script_close(xml: &str, start: usize) -> Option<usize> {
+        let mut pos = start;
+        while let Some(rel_open) = xml.get(pos..).and_then(|s| s.find('<')) {
+            let next_open = pos + rel_open;
+            let rest = xml.get(next_open..).unwrap_or("");
+            if rest.starts_with("</") {
+                let close_name = extract_tag_name(rest);
+                let close_end =
+                    find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+                if Self::local_tag_name(&close_name).eq_ignore_ascii_case("script") {
+                    return Some(close_end);
+                }
+                pos = close_end;
+            } else {
+                pos = next_open + 1;
+            }
+        }
+        None
+    }
+
+    fn find_paired_active_close(xml: &str, start: usize, target_local: &str) -> Option<usize> {
+        let mut depth = 1usize;
+        let mut pos = start;
+        while depth > 0 {
+            let rel_open = xml.get(pos..).and_then(|s| s.find('<'))?;
+            let next_open = pos + rel_open;
+            let rest = xml.get(next_open..).unwrap_or("");
+            if rest.starts_with("<!--") {
+                pos = rest
+                    .find("-->")
+                    .map_or(xml.len(), |idx| next_open + idx + 3);
+                continue;
+            }
+            if rest.starts_with("<![CDATA[") {
+                pos = rest
+                    .find("]]>")
+                    .map_or(xml.len(), |idx| next_open + idx + 3);
+                continue;
+            }
+            if rest.starts_with("<?") {
+                pos = rest.find("?>").map_or(xml.len(), |idx| next_open + idx + 2);
+                continue;
+            }
+            if rest.starts_with("<!") {
+                pos = find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+                continue;
+            }
+            if rest.starts_with("</") {
+                let close_name = extract_tag_name(rest);
+                let close_end =
+                    find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+                if Self::local_tag_name(&close_name).eq_ignore_ascii_case(target_local) {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(close_end);
+                    }
+                }
+                pos = close_end;
+                continue;
+            }
+            let open_name = extract_tag_name(rest);
+            let open_end =
+                find_tag_closing_bracket(rest).map_or(xml.len(), |idx| next_open + idx + 1);
+            let open_slice = xml.get(next_open..open_end).unwrap_or("");
+            let is_self_closing = open_slice.trim_end().ends_with("/>");
+            if !is_self_closing
+                && Self::local_tag_name(&open_name).eq_ignore_ascii_case(target_local)
+            {
+                depth += 1;
+            }
+            pos = open_end;
+        }
+        None
+    }
+
+    fn should_drop_attribute<'a>(
+        attribute: &TagAttribute<'a>,
+        seen_ids: &mut HashSet<Cow<'a, str>>,
+    ) -> bool {
+        Self::is_event_handler_attribute(attribute.name)
+            || (Self::is_uri_attribute(attribute.name) && Self::is_dangerous_uri(&attribute.value))
+            || (attribute.is_named(STYLE_ATTRIBUTE) && Self::is_dangerous_style(&attribute.value))
+            || (attribute.is_named(ID_ATTRIBUTE) && !seen_ids.insert(attribute.value.clone()))
+    }
+
+    fn is_event_handler_attribute(name: &str) -> bool {
+        let local = Self::local_tag_name(name).trim();
+        local.len() > 2
+            && local
+                .get(..2)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("on"))
+    }
+
+    fn is_uri_attribute(name: &str) -> bool {
+        let local = Self::local_tag_name(name);
+        URI_ATTRIBUTES.iter().any(|candidate| {
+            name.eq_ignore_ascii_case(candidate) || local.eq_ignore_ascii_case(candidate)
+        })
+    }
+
+    fn decode_entity_body(body: &str) -> Option<char> {
+        if let Some(num) = body.strip_prefix('#') {
+            if let Some(hex) = num.strip_prefix('x').or_else(|| num.strip_prefix('X')) {
+                if !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return u32::from_str_radix(hex, 16).ok().and_then(char::from_u32);
+                }
+            } else if !num.is_empty() && num.chars().all(|c| c.is_ascii_digit()) {
+                return num.parse::<u32>().ok().and_then(char::from_u32);
+            }
+            return None;
+        }
+        match body.to_ascii_lowercase().as_str() {
+            "colon" => Some(':'),
+            "tab" => Some('\t'),
+            "newline" => Some('\n'),
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "sol" => Some('/'),
+            "semi" => Some(';'),
+            _ => None,
+        }
+    }
+
+    fn decode_xml_entities(input: &str) -> String {
+        let mut decoded = String::with_capacity(input.len());
+        let mut pos = 0usize;
+        while let Some(rel_amp) = input.get(pos..).and_then(|s| s.find('&')) {
+            let amp_idx = pos + rel_amp;
+            if let Some(chunk) = input.get(pos..amp_idx) {
+                decoded.push_str(chunk);
+            }
+            let after_amp = input.get(amp_idx + 1..).unwrap_or("");
+            if let Some(semi_rel) = after_amp.find(';') {
+                let entity_body = after_amp.get(..semi_rel).unwrap_or("");
+                if let Some(ch) = Self::decode_entity_body(entity_body) {
+                    decoded.push(ch);
+                    pos = amp_idx + 1 + semi_rel + 1;
+                    continue;
+                }
+            }
+            decoded.push('&');
+            pos = amp_idx + 1;
+        }
+        if let Some(tail) = input.get(pos..) {
+            decoded.push_str(tail);
+        }
+        decoded
+    }
+
+    fn is_dangerous_uri(value: &str) -> bool {
+        let decoded = Self::decode_xml_entities(value);
+        let normalized: String = decoded
+            .chars()
+            .filter(|ch| !ch.is_control() && !ch.is_whitespace())
+            .map(|ch| ch.to_ascii_lowercase())
+            .collect();
+        if normalized.starts_with("javascript:") || normalized.starts_with("vbscript:") {
+            return true;
+        }
+        normalized.strip_prefix("data:").is_some_and(|rest| {
+            rest.starts_with("text/html")
+                || rest.starts_with("application/xhtml+xml")
+                || rest.starts_with("image/svg+xml")
+        })
+    }
+
+    fn strip_css_comments(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut pos = 0usize;
+        while let Some(rel_start) = input.get(pos..).and_then(|s| s.find("/*")) {
+            let start_idx = pos + rel_start;
+            if let Some(chunk) = input.get(pos..start_idx) {
+                out.push_str(chunk);
+            }
+            pos = input
+                .get(start_idx + 2..)
+                .and_then(|s| s.find("*/"))
+                .map_or(input.len(), |rel_end| start_idx + 2 + rel_end + 2);
+        }
+        if let Some(tail) = input.get(pos..) {
+            out.push_str(tail);
+        }
+        out
+    }
+
+    fn is_dangerous_style(value: &str) -> bool {
+        let decoded = Self::decode_xml_entities(value);
+        let without_comments = Self::strip_css_comments(&decoded);
+        let normalized: String = without_comments
+            .chars()
+            .filter(|ch| !ch.is_control() && !ch.is_whitespace())
+            .map(|ch| ch.to_ascii_lowercase())
+            .collect();
+        normalized.contains("javascript:")
+            || normalized.contains("vbscript:")
+            || normalized.contains("data:text/html")
+            || normalized.contains("data:application/xhtml+xml")
+            || normalized.contains("expression(")
+    }
+
     fn is_structural(attribute: &TagAttribute<'_>) -> bool {
         STRUCTURAL_ATTRIBUTES
             .iter()
@@ -125,29 +426,40 @@ impl XhtmlConformance {
         !trimmed.is_empty() && trimmed.bytes().all(|b| b.is_ascii_digit())
     }
 
-    fn is_decimal(value: &str) -> bool {
-        let mut dots = 0;
-        let all_numeric = value.bytes().all(|b| match b {
-            b'.' => {
-                dots += 1;
-                true
+    fn parse_strict_css_dimension(value: &str) -> Option<(&str, Option<&str>)> {
+        let int_len = value.bytes().take_while(u8::is_ascii_digit).count();
+        if int_len == 0 {
+            return None;
+        }
+        let after_int = value.get(int_len..)?;
+        let num_len = if let Some(after_dot) = after_int.strip_prefix('.') {
+            let frac_len = after_dot.bytes().take_while(u8::is_ascii_digit).count();
+            if frac_len == 0 {
+                return None;
             }
-            _ => b.is_ascii_digit(),
-        });
-        all_numeric && dots <= 1 && value.bytes().any(|b| b.is_ascii_digit())
+            int_len + 1 + frac_len
+        } else {
+            int_len
+        };
+        let (number, unit) = value.split_at(num_len);
+        if unit.is_empty() {
+            Some((number, None))
+        } else if ALLOWED_CSS_UNITS.contains(&unit) {
+            Some((number, Some(unit)))
+        } else {
+            None
+        }
     }
 
     fn css_declaration(attribute: &TagAttribute<'_>) -> Option<(String, String)> {
         let value = attribute.value.trim();
         let property = attribute.name.to_ascii_lowercase();
-        if Self::is_decimal(value) {
-            return Some((property, format!("{value}px")));
-        }
-        let starts_numeric = value
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_digit() || b == b'.');
-        starts_numeric.then(|| (property, value.to_string()))
+        let (number, unit) = Self::parse_strict_css_dimension(value)?;
+        let css_value = match unit {
+            Some(u) => format!("{number}{u}"),
+            None => format!("{number}px"),
+        };
+        Some((property, css_value))
     }
 
     fn declares_property(style: &str, property: &str) -> bool {

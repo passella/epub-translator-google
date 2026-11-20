@@ -1,3 +1,4 @@
+use crate::adapters::error_logger::ErrorLogger;
 use crate::domain::entities::ExecutionMetrics;
 use crate::domain::ports::ProgressReporterPort;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -30,7 +31,8 @@ impl ProgressReporterPort for IndicatifProgressReporter {
             .progress_chars("#>-");
 
         pb.set_style(style);
-        pb.set_message(format!("Iniciando: {book_title}"));
+        let safe_title = ErrorLogger::sanitize_terminal_text(book_title);
+        pb.set_message(format!("Iniciando: {safe_title}"));
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
         let mut lock = self.bar.lock().unwrap_or_else(|p| p.into_inner());
@@ -40,7 +42,8 @@ impl ProgressReporterPort for IndicatifProgressReporter {
     fn on_chapter_start(&self, _index: usize, chapter_path: &str) {
         let lock = self.bar.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(pb) = lock.as_ref() {
-            pb.set_message(format!("Traduzindo {chapter_path}"));
+            let safe_path = ErrorLogger::sanitize_terminal_text(chapter_path);
+            pb.set_message(format!("Traduzindo {safe_path}"));
         }
     }
 
@@ -54,7 +57,7 @@ impl ProgressReporterPort for IndicatifProgressReporter {
     fn on_finish(&self, message: &str) {
         let lock = self.bar.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(pb) = lock.as_ref() {
-            pb.finish_with_message(message.to_string());
+            pb.finish_with_message(ErrorLogger::sanitize_terminal_text(message));
         }
     }
 
@@ -107,7 +110,7 @@ impl ProgressReporterPort for IndicatifProgressReporter {
                 println!(
                     "    - [{}] {}: {:.2}s ({} ms)",
                     entry.index + 1,
-                    entry.path,
+                    ErrorLogger::sanitize_terminal_text(&entry.path),
                     entry.latency.as_secs_f64(),
                     entry.latency.as_millis()
                 );

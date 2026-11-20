@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - master
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 permissions:
@@ -16,6 +20,7 @@ concurrency:
 jobs:
   check:
     name: Format, Clippy & Tests
+    if: github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.meta.outputs.tag }}
@@ -57,11 +62,11 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
-            bin_name: install-in-arch-linux-x86_64
+            bin_name: epub-translator-google-linux-x86_64
             cc_env: CC_x86_64_unknown_linux_musl
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
-            bin_name: install-in-arch-linux-aarch64
+            bin_name: epub-translator-google-linux-aarch64
             cc_env: CC_aarch64_unknown_linux_musl
 
     steps:
@@ -73,7 +78,7 @@ jobs:
       - name: Install musl toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y --no-install-recommends musl-tools
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
@@ -98,7 +103,7 @@ jobs:
 
           cargo build --release --locked --target "${TARGET}"
 
-          BIN_PATH="target/${TARGET}/release/install-in-arch"
+          BIN_PATH="target/${TARGET}/release/epub-translator-google"
           strip "${BIN_PATH}"
 
           file "${BIN_PATH}"
@@ -108,9 +113,9 @@ jobs:
           rm -rf dist staging
           mkdir -p dist staging
 
-          install -m 0755 "${BIN_PATH}" staging/install-in-arch
+          install -m 0755 "${BIN_PATH}" staging/epub-translator-google
           cp README.md staging/README.md
-          tar -czf "dist/install-in-arch-${TAG}-${TARGET}.tar.gz" -C staging install-in-arch README.md
+          tar -czf "dist/epub-translator-google-${TAG}-${TARGET}.tar.gz" -C staging epub-translator-google README.md
 
           install -m 0755 "${BIN_PATH}" "dist/${BIN_NAME}"
           ls -lh dist/
@@ -122,11 +127,10 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  smoke-archlinux:
-    name: Smoke Test Static Musl on Arch Linux
+  smoke-x86_64:
+    name: Smoke Test Static Musl (x86_64)
     needs: [check, build]
     runs-on: ubuntu-24.04
-    container: archlinux@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
 
     steps:
       - name: Download x86_64 musl artifact
@@ -135,85 +139,93 @@ jobs:
           name: x86_64-unknown-linux-musl
           path: dist
 
-      - name: Validate static musl binary, tarball and synthetic .deb against real pacman
+      - name: Validate static musl binary and tarball on x86_64
         env:
           TAG: ${{ needs.check.outputs.tag }}
         run: |
           set -euo pipefail
-          chmod +x dist/install-in-arch-linux-x86_64
-          ./dist/install-in-arch-linux-x86_64 --version
-          ./dist/install-in-arch-linux-x86_64 --help
-          ./dist/install-in-arch-linux-x86_64 --list
+          SMOKE_DIR="$(mktemp -d "${RUNNER_TEMP}/smoke-x86_64.XXXXXX")"
+          trap 'rm -rf "${SMOKE_DIR}"' EXIT
 
-          rm -rf /tmp/smoke_tar /tmp/smoke_deb /tmp/smoke_out /tmp/smoke.deb
-          mkdir -p /tmp/smoke_tar /tmp/smoke_deb/ctrl /tmp/smoke_deb/data/usr/bin /tmp/smoke_out
+          chmod +x dist/epub-translator-google-linux-x86_64
+          file dist/epub-translator-google-linux-x86_64
+          file dist/epub-translator-google-linux-x86_64 | grep -iE 'static|statically'
+          ./dist/epub-translator-google-linux-x86_64 --version
+          ./dist/epub-translator-google-linux-x86_64 --help
 
-          tar -xzf "dist/install-in-arch-${TAG}-x86_64-unknown-linux-musl.tar.gz" -C /tmp/smoke_tar
-          test -f /tmp/smoke_tar/README.md
-          test -x /tmp/smoke_tar/install-in-arch
-          /tmp/smoke_tar/install-in-arch --version
-          /tmp/smoke_tar/install-in-arch --help
-          /tmp/smoke_tar/install-in-arch --list
+          tar -xzf "dist/epub-translator-google-${TAG}-x86_64-unknown-linux-musl.tar.gz" -C "${SMOKE_DIR}"
+          test -f "${SMOKE_DIR}/README.md"
+          test -x "${SMOKE_DIR}/epub-translator-google"
+          "${SMOKE_DIR}/epub-translator-google" --version
+          "${SMOKE_DIR}/epub-translator-google" --help
 
-          printf '2.0\n' > /tmp/smoke_deb/debian-binary
-          printf 'Package: smoke-test\nVersion: 1.0.0\nArchitecture: amd64\nDescription: Smoke test package\n' > /tmp/smoke_deb/ctrl/control
-          printf '#!/bin/sh\necho smoke\n' > /tmp/smoke_deb/data/usr/bin/smoke-test
-          chmod 0755 /tmp/smoke_deb/data/usr/bin/smoke-test
-          tar -czf /tmp/smoke_deb/control.tar.gz -C /tmp/smoke_deb/ctrl control
-          tar -czf /tmp/smoke_deb/data.tar.gz -C /tmp/smoke_deb/data usr
-          bsdtar --format=arsvr4 -cf /tmp/smoke.deb -C /tmp/smoke_deb debian-binary control.tar.gz data.tar.gz
-
-          /tmp/smoke_tar/install-in-arch --dry-run --ignore-deps --keep-pkg /tmp/smoke_out /tmp/smoke.deb
-          PKG_FILE="/tmp/smoke_out/smoke-test-1.0.0-1-x86_64.pkg.tar.zst"
-          test -f "${PKG_FILE}"
-          pacman -Qpi "${PKG_FILE}"
-          pacman -Qpl "${PKG_FILE}"
-          pacman -Qpl "${PKG_FILE}" | grep -qx 'smoke-test /usr/bin/smoke-test'
-
-      - name: Validate synthetic .rpm against real pacman
+      - name: Run offline EPUB verify smoke test on x86_64
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
           set -euo pipefail
-          if [ ! -d /etc/pacman.d/gnupg ]; then
-            pacman-key --init
-            pacman-key --populate archlinux
+          SMOKE_DIR="$(mktemp -d "${RUNNER_TEMP}/smoke-verify-x86_64.XXXXXX")"
+          trap 'rm -rf "${SMOKE_DIR}"' EXIT
+
+          mkdir -p "${SMOKE_DIR}/bin"
+          tar -xzf "dist/epub-translator-google-${TAG}-x86_64-unknown-linux-musl.tar.gz" -C "${SMOKE_DIR}/bin"
+
+          SMOKE_DIR="${SMOKE_DIR}" python3 - <<'PY'
+          import os
+          import zipfile
+
+          smoke_dir = os.environ["SMOKE_DIR"]
+          valid_epub = os.path.join(smoke_dir, "valid.epub")
+          invalid_epub = os.path.join(smoke_dir, "invalid.epub")
+
+          with zipfile.ZipFile(valid_epub, "w") as zf:
+              zf.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
+              zf.writestr(
+                  "META-INF/container.xml",
+                  '<?xml version="1.0" encoding="UTF-8"?>'
+                  '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                  "<rootfiles>"
+                  '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+                  "</rootfiles>"
+                  "</container>",
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+              zf.writestr(
+                  "OEBPS/content.opf",
+                  '<?xml version="1.0" encoding="UTF-8"?>'
+                  '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">'
+                  '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                  '<dc:identifier id="uid">smoke-test</dc:identifier>'
+                  "<dc:title>Smoke</dc:title>"
+                  "<dc:language>en</dc:language>"
+                  "</metadata>"
+                  "<manifest>"
+                  '<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+                  "</manifest>"
+                  "<spine>"
+                  '<itemref idref="ch1"/>'
+                  "</spine>"
+                  "</package>",
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+              zf.writestr(
+                  "OEBPS/ch1.xhtml",
+                  '<?xml version="1.0" encoding="UTF-8"?>'
+                  '<html xmlns="http://www.w3.org/1999/xhtml">'
+                  "<head><title>Smoke</title></head>"
+                  "<body><p>Hello</p></body>"
+                  "</html>",
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+
+          with zipfile.ZipFile(invalid_epub, "w") as zf:
+              zf.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_DEFLATED)
+          PY
+          "${SMOKE_DIR}/bin/epub-translator-google" verify "${SMOKE_DIR}/valid.epub"
+          if "${SMOKE_DIR}/bin/epub-translator-google" verify "${SMOKE_DIR}/invalid.epub"; then
+            echo "Expected verify to fail on invalid EPUB without stored mimetype" >&2
+            exit 1
           fi
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -S --noconfirm rpm-tools
-
-          rm -rf /tmp/rpmbuild /tmp/smoke_rpm_out
-          mkdir -p /tmp/rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS} /tmp/smoke_rpm_out
-
-          cat <<'SPEC' > /tmp/rpmbuild/SPECS/smoke-rpm.spec
-          %global debug_package %{nil}
-          Name: smoke-rpm
-          Version: 1.0.0
-          Release: 1
-          Summary: Smoke test RPM package
-          License: MIT
-          BuildArch: x86_64
-
-          %description
-          Synthetic RPM package for Arch Linux smoke validation.
-
-          %install
-          mkdir -p %{buildroot}/usr/bin
-          printf '#!/bin/sh\necho smoke-rpm\n' > %{buildroot}/usr/bin/smoke-rpm
-          chmod 0755 %{buildroot}/usr/bin/smoke-rpm
-
-          %files
-          /usr/bin/smoke-rpm
-          SPEC
-
-          rpmbuild -bb --define "_topdir /tmp/rpmbuild" /tmp/rpmbuild/SPECS/smoke-rpm.spec
-          RPM_FILE="/tmp/rpmbuild/RPMS/x86_64/smoke-rpm-1.0.0-1.x86_64.rpm"
-          test -f "${RPM_FILE}"
-
-          /tmp/smoke_tar/install-in-arch --dry-run --ignore-deps --keep-pkg /tmp/smoke_rpm_out "${RPM_FILE}"
-          PKG_FILE="/tmp/smoke_rpm_out/smoke-rpm-1.0.0-1-x86_64.pkg.tar.zst"
-          test -f "${PKG_FILE}"
-          pacman -Qpi "${PKG_FILE}"
-          pacman -Qpl "${PKG_FILE}"
-          pacman -Qpl "${PKG_FILE}" | grep -qx 'smoke-rpm /usr/bin/smoke-rpm'
 
   smoke-aarch64:
     name: Smoke Test Static Musl (aarch64)
@@ -227,47 +239,104 @@ jobs:
           name: aarch64-unknown-linux-musl
           path: dist
 
-      - name: Validate static musl binary, tarball and synthetic .deb on aarch64
+      - name: Validate static musl binary and tarball on aarch64
         env:
           TAG: ${{ needs.check.outputs.tag }}
         run: |
           set -euo pipefail
-          chmod +x dist/install-in-arch-linux-aarch64
-          ./dist/install-in-arch-linux-aarch64 --version
-          ./dist/install-in-arch-linux-aarch64 --help
+          SMOKE_DIR="$(mktemp -d "${RUNNER_TEMP}/smoke-aarch64.XXXXXX")"
+          trap 'rm -rf "${SMOKE_DIR}"' EXIT
 
-          rm -rf /tmp/smoke_arm_tar /tmp/smoke_arm_deb /tmp/smoke_arm_out /tmp/smoke_arm.deb
-          mkdir -p /tmp/smoke_arm_tar /tmp/smoke_arm_deb/ctrl /tmp/smoke_arm_deb/data/usr/bin /tmp/smoke_arm_out
+          chmod +x dist/epub-translator-google-linux-aarch64
+          file dist/epub-translator-google-linux-aarch64
+          file dist/epub-translator-google-linux-aarch64 | grep -iE 'static|statically'
+          ./dist/epub-translator-google-linux-aarch64 --version
+          ./dist/epub-translator-google-linux-aarch64 --help
 
-          tar -xzf "dist/install-in-arch-${TAG}-aarch64-unknown-linux-musl.tar.gz" -C /tmp/smoke_arm_tar
-          test -f /tmp/smoke_arm_tar/README.md
-          test -x /tmp/smoke_arm_tar/install-in-arch
-          /tmp/smoke_arm_tar/install-in-arch --version
-          /tmp/smoke_arm_tar/install-in-arch --help
+          tar -xzf "dist/epub-translator-google-${TAG}-aarch64-unknown-linux-musl.tar.gz" -C "${SMOKE_DIR}"
+          test -f "${SMOKE_DIR}/README.md"
+          test -x "${SMOKE_DIR}/epub-translator-google"
+          "${SMOKE_DIR}/epub-translator-google" --version
+          "${SMOKE_DIR}/epub-translator-google" --help
 
-          printf '2.0\n' > /tmp/smoke_arm_deb/debian-binary
-          printf 'Package: smoke-arm\nVersion: 1.0.0\nArchitecture: arm64\nDescription: Smoke test ARM64 package\n' > /tmp/smoke_arm_deb/ctrl/control
-          printf '#!/bin/sh\necho smoke-arm\n' > /tmp/smoke_arm_deb/data/usr/bin/smoke-arm
-          chmod 0755 /tmp/smoke_arm_deb/data/usr/bin/smoke-arm
-          tar -czf /tmp/smoke_arm_deb/control.tar.gz -C /tmp/smoke_arm_deb/ctrl control
-          tar -czf /tmp/smoke_arm_deb/data.tar.gz -C /tmp/smoke_arm_deb/data usr
-          (
-            cd /tmp/smoke_arm_deb
-            ar rcs /tmp/smoke_arm.deb debian-binary control.tar.gz data.tar.gz
-          )
+      - name: Run offline EPUB verify smoke test on aarch64
+        env:
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="$(mktemp -d "${RUNNER_TEMP}/smoke-verify-aarch64.XXXXXX")"
+          trap 'rm -rf "${SMOKE_DIR}"' EXIT
 
-          /tmp/smoke_arm_tar/install-in-arch --dry-run --ignore-deps --keep-pkg /tmp/smoke_arm_out /tmp/smoke_arm.deb
-          PKG_FILE="/tmp/smoke_arm_out/smoke-arm-1.0.0-1-aarch64.pkg.tar.zst"
-          test -s "${PKG_FILE}"
-          ls -lh "${PKG_FILE}"
+          mkdir -p "${SMOKE_DIR}/bin"
+          tar -xzf "dist/epub-translator-google-${TAG}-aarch64-unknown-linux-musl.tar.gz" -C "${SMOKE_DIR}/bin"
+
+          SMOKE_DIR="${SMOKE_DIR}" python3 - <<'PY'
+          import os
+          import zipfile
+
+          smoke_dir = os.environ["SMOKE_DIR"]
+          valid_epub = os.path.join(smoke_dir, "valid.epub")
+          invalid_epub = os.path.join(smoke_dir, "invalid.epub")
+
+          with zipfile.ZipFile(valid_epub, "w") as zf:
+              zf.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_STORED)
+              zf.writestr(
+                  "META-INF/container.xml",
+                  '<?xml version="1.0" encoding="UTF-8"?>'
+                  '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                  "<rootfiles>"
+                  '<rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>'
+                  "</rootfiles>"
+                  "</container>",
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+              zf.writestr(
+                  "OEBPS/content.opf",
+                  '<?xml version="1.0" encoding="UTF-8"?>'
+                  '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">'
+                  '<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                  '<dc:identifier id="uid">smoke-test</dc:identifier>'
+                  "<dc:title>Smoke</dc:title>"
+                  "<dc:language>en</dc:language>"
+                  "</metadata>"
+                  "<manifest>"
+                  '<item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+                  "</manifest>"
+                  "<spine>"
+                  '<itemref idref="ch1"/>'
+                  "</spine>"
+                  "</package>",
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+              zf.writestr(
+                  "OEBPS/ch1.xhtml",
+                  '<?xml version="1.0" encoding="UTF-8"?>'
+                  '<html xmlns="http://www.w3.org/1999/xhtml">'
+                  "<head><title>Smoke</title></head>"
+                  "<body><p>Hello</p></body>"
+                  "</html>",
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+
+          with zipfile.ZipFile(invalid_epub, "w") as zf:
+              zf.writestr("mimetype", b"application/epub+zip", compress_type=zipfile.ZIP_DEFLATED)
+          PY
+          "${SMOKE_DIR}/bin/epub-translator-google" verify "${SMOKE_DIR}/valid.epub"
+          if "${SMOKE_DIR}/bin/epub-translator-google" verify "${SMOKE_DIR}/invalid.epub"; then
+            echo "Expected verify to fail on invalid EPUB without stored mimetype" >&2
+            exit 1
+          fi
 
   publish:
     name: Publish GitHub Release
-    needs: [check, build, smoke-archlinux, smoke-aarch64]
+    if: github.ref == 'refs/heads/master'
+    needs: [check, build, smoke-x86_64, smoke-aarch64]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: read
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout repository
@@ -275,9 +344,13 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Clean dist directory
+        run: rm -rf dist
+
       - name: Download all release artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: '*-unknown-linux-musl'
           path: dist
           merge-multiple: true
 
@@ -289,30 +362,45 @@ jobs:
           (
             cd dist
             sha256sum \
-              "install-in-arch-${TAG}-x86_64-unknown-linux-musl.tar.gz" \
-              "install-in-arch-${TAG}-aarch64-unknown-linux-musl.tar.gz" \
-              "install-in-arch-linux-x86_64" \
-              "install-in-arch-linux-aarch64" \
+              "epub-translator-google-${TAG}-x86_64-unknown-linux-musl.tar.gz" \
+              "epub-translator-google-${TAG}-aarch64-unknown-linux-musl.tar.gz" \
+              "epub-translator-google-linux-x86_64" \
+              "epub-translator-google-linux-aarch64" \
               > SHA256SUMS.txt
           )
           ls -lh dist/
           cat dist/SHA256SUMS.txt
 
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/epub-translator-google-${{ needs.check.outputs.tag }}-x86_64-unknown-linux-musl.tar.gz
+            dist/epub-translator-google-${{ needs.check.outputs.tag }}-aarch64-unknown-linux-musl.tar.gz
+            dist/epub-translator-google-linux-x86_64
+            dist/epub-translator-google-linux-aarch64
+
       - name: Generate release notes
+        id: release_notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          rm -f /tmp/pr.json /tmp/release_notes.md
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" > /tmp/pr.json || true
+          NOTES_DIR="$(mktemp -d "${RUNNER_TEMP}/release-notes.XXXXXX")"
+          trap 'rm -f "${NOTES_DIR}/pr.json"' EXIT
+          trap 'rm -rf "${NOTES_DIR}"' ERR
 
-          python3 - <<'PY'
+          PR_JSON_PATH="${NOTES_DIR}/pr.json"
+          NOTES_PATH="${NOTES_DIR}/release_notes.md"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" > "${PR_JSON_PATH}" || true
+
+          PR_JSON_PATH="${PR_JSON_PATH}" NOTES_PATH="${NOTES_PATH}" python3 - <<'PY'
           import json
           import os
           import subprocess
 
-          pr_json_path = "/tmp/pr.json"
-          notes_path = "/tmp/release_notes.md"
+          pr_json_path = os.environ["PR_JSON_PATH"]
+          notes_path = os.environ["NOTES_PATH"]
           notes = ""
 
           if os.path.exists(pr_json_path) and os.path.getsize(pr_json_path) > 0:
@@ -320,10 +408,8 @@ jobs:
                   with open(pr_json_path, "r", encoding="utf-8") as fh:
                       data = json.load(fh)
                   if isinstance(data, list):
-                      merged = [p for p in data if p.get("merged_at")]
-                      pr = merged[0] if merged else (data[0] if data else None)
-                  elif isinstance(data, dict):
-                      pr = data
+                      merged = [p for p in data if isinstance(p, dict) and p.get("merged_at")]
+                      pr = merged[0] if merged else None
                   else:
                       pr = None
                   if pr:
@@ -343,14 +429,22 @@ jobs:
           with open(notes_path, "w", encoding="utf-8") as fh:
               fh.write(notes)
           PY
+          echo "notes_file=${NOTES_PATH}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.check.outputs.tag }}
+          NOTES_FILE: ${{ steps.release_notes.outputs.notes_file }}
         run: |
           set -euo pipefail
-          gh release create "${TAG}" dist/* \
+          trap 'rm -rf "$(dirname "${NOTES_FILE}")"' EXIT
+          gh release create "${TAG}" \
+            "dist/epub-translator-google-${TAG}-x86_64-unknown-linux-musl.tar.gz" \
+            "dist/epub-translator-google-${TAG}-aarch64-unknown-linux-musl.tar.gz" \
+            "dist/epub-translator-google-linux-x86_64" \
+            "dist/epub-translator-google-linux-aarch64" \
+            "dist/SHA256SUMS.txt" \
             --title "${TAG}" \
-            --notes-file /tmp/release_notes.md \
+            --notes-file "${NOTES_FILE}" \
             --target "${GITHUB_SHA}"

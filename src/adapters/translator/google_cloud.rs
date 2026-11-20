@@ -4,7 +4,10 @@ use crate::domain::errors::TranslationError;
 use crate::domain::ports::TranslatorPort;
 use async_trait::async_trait;
 use reqwest::Client;
+use reqwest::header::HeaderValue;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use zeroize::Zeroizing;
 
 #[derive(Serialize)]
 struct GoogleCloudRequestBody<'a> {
@@ -45,28 +48,44 @@ struct GoogleCloudErrorResponse {
 
 pub struct GoogleCloudTranslatorAdapter {
     client: Client,
-    api_key: String,
+    api_key: Zeroizing<String>,
 }
 
 impl GoogleCloudTranslatorAdapter {
+    fn read_non_empty_env(var_name: &str) -> Option<Zeroizing<String>> {
+        std::env::var(var_name)
+            .ok()
+            .map(Zeroizing::new)
+            .map(|v| Zeroizing::new(v.trim().to_string()))
+            .filter(|v| !v.is_empty())
+    }
+
     pub fn new(api_key: impl Into<String>) -> Result<Self, TranslationError> {
-        let key = api_key.into();
-        let final_key = if key.is_empty() {
-            std::env::var("GOOGLE_CLOUD_TRANSLATION_API_KEY")
-                .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-                .map_err(|_| {
+        let key = Zeroizing::new(api_key.into());
+        let trimmed = key.trim();
+        let final_key = if trimmed.is_empty() {
+            Self::read_non_empty_env("GOOGLE_CLOUD_TRANSLATION_API_KEY")
+                .or_else(|| Self::read_non_empty_env("GOOGLE_TRANSLATE_API_KEY"))
+                .or_else(|| Self::read_non_empty_env("GOOGLE_API_KEY"))
+                .ok_or_else(|| {
                     TranslationError::Authentication(
-                        "Google Cloud Translation API key not provided and not found in environment variables GOOGLE_CLOUD_TRANSLATION_API_KEY or GOOGLE_API_KEY".to_string(),
+                        "Google Cloud Translation API key not provided and not found in environment variables GOOGLE_CLOUD_TRANSLATION_API_KEY, GOOGLE_TRANSLATE_API_KEY or GOOGLE_API_KEY".to_string(),
                     )
                 })?
         } else {
-            key
+            Zeroizing::new(trimmed.to_string())
         };
 
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .connect_timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(true)
+            .build()
+            .map_err(|e| TranslationError::Http(format!("Failed to build reqwest client: {e}")))?;
+
         Ok(Self {
-            client: Client::builder().build().map_err(|e| {
-                TranslationError::Http(format!("Failed to build reqwest client: {e}"))
-            })?,
+            client,
             api_key: final_key,
         })
     }
@@ -114,10 +133,15 @@ impl TranslatorPort for GoogleCloudTranslatorAdapter {
 
         let url = "https://translation.googleapis.com/language/translate/v2";
 
+        let mut api_key_header = HeaderValue::from_str(&self.api_key).map_err(|e| {
+            TranslationError::Authentication(format!("Invalid API key header value: {e}"))
+        })?;
+        api_key_header.set_sensitive(true);
+
         let request = self
             .client
             .post(url)
-            .header("X-goog-api-key", &self.api_key)
+            .header("X-goog-api-key", api_key_header)
             .json(&request_body)
             .build()
             .map_err(|e| TranslationError::Http(format!("Failed to build HTTP request: {e}")))?;

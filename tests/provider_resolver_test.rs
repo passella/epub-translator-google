@@ -283,12 +283,7 @@ fn test_provider_config_resolver_dispatch_all_providers() {
 
     let cloud_config =
         ProviderConfigResolver::resolve(TranslationProviderKind::GoogleCloud, &args, true).unwrap();
-    assert_eq!(
-        cloud_config,
-        ProviderConfig::GoogleCloud {
-            api_key: "gcp-key-456".to_string()
-        }
-    );
+    assert_eq!(cloud_config, ProviderConfig::google_cloud("gcp-key-456"));
 }
 
 #[test]

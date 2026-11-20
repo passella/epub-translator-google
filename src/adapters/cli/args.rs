@@ -68,6 +68,7 @@ pub struct CliArgs {
 
     #[arg(
         long,
+        global = true,
         default_value = "translations_cache.db",
         value_name = "ARQUIVO_DB"
     )]

@@ -1,7 +1,7 @@
 use crate::domain::entities::{ChapterLatency, EpubBook, ExecutionMetrics, Language};
 use crate::domain::errors::{AppError, ChapterTranslationError, TranslationError};
 use crate::domain::ports::{CachePort, EpubPort, ProgressReporterPort, TranslatorPort};
-use crate::domain::services::{XhtmlConformance, XhtmlValidator};
+use crate::domain::services::{XhtmlConformance, XhtmlValidationError, XhtmlValidator};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -132,36 +132,36 @@ impl TranslateBookUseCase {
                     .await?;
 
                 let valid_cached = match cached_translation.filter(|c| !c.trim().is_empty()) {
-                    Some(cached) => match XhtmlValidator::heal_and_validate(&cached)
-                        .map(|healed| XhtmlConformance::enforce(&trimmed_content, &healed))
-                    {
-                        Ok(healed) => {
-                            if healed != cached {
-                                let _ = cache_port
-                                    .set(
-                                        cur_lang.as_str(),
-                                        target_lang.as_str(),
-                                        &provider_name,
-                                        &trimmed_content,
-                                        &healed,
-                                    )
-                                    .await;
-                                if cur_lang.is_auto() {
+                    Some(cached) => {
+                        match Self::heal_enforce_and_validate(&trimmed_content, &cached) {
+                            Ok(healed) => {
+                                if healed != cached {
                                     let _ = cache_port
                                         .set(
-                                            "auto",
+                                            cur_lang.as_str(),
                                             target_lang.as_str(),
                                             &provider_name,
                                             &trimmed_content,
                                             &healed,
                                         )
                                         .await;
+                                    if cur_lang.is_auto() {
+                                        let _ = cache_port
+                                            .set(
+                                                "auto",
+                                                target_lang.as_str(),
+                                                &provider_name,
+                                                &trimmed_content,
+                                                &healed,
+                                            )
+                                            .await;
+                                    }
                                 }
+                                Some(healed)
                             }
-                            Some(healed)
+                            Err(_) => None,
                         }
-                        Err(_) => None,
-                    },
+                    }
                     None => None,
                 };
 
@@ -191,7 +191,8 @@ impl TranslateBookUseCase {
                             })?;
                         let call_duration = call_start.elapsed();
 
-                        let validated_text = XhtmlValidator::heal_and_validate(
+                        let validated_text = Self::heal_enforce_and_validate(
+                            &trimmed_content,
                             &result.translated_text,
                         )
                         .map_err(|val_err| {
@@ -205,8 +206,6 @@ impl TranslateBookUseCase {
                                 source: TranslationError::XmlValidation(val_err.to_string()),
                             }))
                         })?;
-                        let validated_text =
-                            XhtmlConformance::enforce(&trimmed_content, &validated_text);
 
                         let was_auto = cur_lang.is_auto();
                         if was_auto {
@@ -338,6 +337,16 @@ impl TranslateBookUseCase {
         }
 
         Ok(metrics)
+    }
+
+    fn heal_enforce_and_validate(
+        original: &str,
+        candidate: &str,
+    ) -> Result<String, XhtmlValidationError> {
+        let healed = XhtmlValidator::heal_and_validate(candidate)?;
+        let enforced = XhtmlConformance::enforce(original, &healed);
+        XhtmlValidator::validate(&enforced)?;
+        Ok(enforced)
     }
 
     fn extract_snippets(content: &str) -> (String, String) {

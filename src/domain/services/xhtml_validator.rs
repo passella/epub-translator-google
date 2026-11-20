@@ -1,7 +1,7 @@
 use super::xhtml_common::{extract_tag_name, is_valid_xml_entity, is_void_tag};
 use super::xhtml_conformance::XhtmlConformance;
 use quick_xml::Reader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use thiserror::Error;
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
@@ -40,6 +40,7 @@ impl XhtmlValidator {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(e)) => {
+                    Self::validate_tag_attributes(&e)?;
                     let name = e.name().as_ref().to_string();
                     tag_stack.push(name);
                 }
@@ -56,7 +57,9 @@ impl XhtmlValidator {
                         return Err(XhtmlValidationError::UnexpectedEndTag(name));
                     }
                 }
-                Ok(Event::Empty(_)) => {}
+                Ok(Event::Empty(e)) => {
+                    Self::validate_tag_attributes(&e)?;
+                }
                 Ok(Event::Text(t)) => {
                     let text = t.as_ref();
                     let mut idx = 0;
@@ -91,6 +94,19 @@ impl XhtmlValidator {
         Ok(())
     }
 
+    fn validate_tag_attributes(e: &BytesStart<'_>) -> Result<(), XhtmlValidationError> {
+        for attr_result in e.attributes() {
+            let attr =
+                attr_result.map_err(|err| XhtmlValidationError::MalformedXml(err.to_string()))?;
+            if attr.value.contains('<') {
+                return Err(XhtmlValidationError::MalformedXml(
+                    "Unescaped '<' found in XML attribute value".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn heal(xml: &str) -> String {
         let trimmed = xml.trim();
         if trimmed.is_empty() {
@@ -109,7 +125,15 @@ impl XhtmlValidator {
         }
 
         if Self::validate(trimmed).is_ok() {
-            return Ok(trimmed.to_string());
+            let sanitized = XhtmlConformance::sanitize(trimmed);
+            if sanitized == trimmed {
+                return Ok(trimmed.to_string());
+            }
+            if sanitized.trim().is_empty() {
+                return Err(XhtmlValidationError::EmptyOutput);
+            }
+            Self::validate(&sanitized)?;
+            return Ok(sanitized);
         }
 
         let healed = Self::heal(trimmed);
@@ -207,7 +231,9 @@ impl XhtmlValidator {
                 let mut in_quote: Option<char> = None;
 
                 while i < len {
-                    let c = xml[i..].chars().next().unwrap();
+                    let Some(c) = xml.get(i..).and_then(|s| s.chars().next()) else {
+                        break;
+                    };
                     let c_len = c.len_utf8();
 
                     if let Some(q) = in_quote {
@@ -265,7 +291,9 @@ impl XhtmlValidator {
                     out.push('>');
                 }
             } else {
-                let c = xml[i..].chars().next().unwrap();
+                let Some(c) = xml.get(i..).and_then(|s| s.chars().next()) else {
+                    break;
+                };
                 let c_len = c.len_utf8();
                 out.push(c);
                 i += c_len;
@@ -281,7 +309,9 @@ impl XhtmlValidator {
         let mut in_tag = false;
 
         while i < xml.len() {
-            let ch = xml[i..].chars().next().unwrap();
+            let Some(ch) = xml.get(i..).and_then(|s| s.chars().next()) else {
+                break;
+            };
             let ch_len = ch.len_utf8();
 
             if ch == '<' {
@@ -380,11 +410,11 @@ impl XhtmlValidator {
 
                 if tag_stack
                     .last()
-                    .map(|t| t.eq_ignore_ascii_case(&tag_name))
-                    .unwrap_or(false)
+                    .is_some_and(|t| t.eq_ignore_ascii_case(&tag_name))
                 {
-                    let actual = tag_stack.pop().unwrap();
-                    out.push_str(&format!("</{actual}>"));
+                    if let Some(actual) = tag_stack.pop() {
+                        out.push_str(&format!("</{actual}>"));
+                    }
                 } else if tag_stack.iter().any(|t| t.eq_ignore_ascii_case(&tag_name)) {
                     while let Some(top) = tag_stack.pop() {
                         if top.eq_ignore_ascii_case(&tag_name) {

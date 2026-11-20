@@ -93,7 +93,12 @@ impl GoogleCloudOptionResolver {
     pub fn resolve_api_key(&self, options: &ProviderOptions) -> Result<String, AppError> {
         self.resolve_api_key_with_env(
             options,
-            || std::env::var("GOOGLE_TRANSLATE_API_KEY").ok(),
+            || {
+                std::env::var("GOOGLE_CLOUD_TRANSLATION_API_KEY")
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| std::env::var("GOOGLE_TRANSLATE_API_KEY").ok())
+            },
             || std::env::var("GOOGLE_API_KEY").ok(),
         )
     }
@@ -147,6 +152,6 @@ impl GoogleCloudOptionResolver {
 impl ProviderOptionResolver for GoogleCloudOptionResolver {
     fn resolve(&self, options: &ProviderOptions) -> Result<ProviderConfig, AppError> {
         let api_key = self.resolve_api_key(options)?;
-        Ok(ProviderConfig::GoogleCloud { api_key })
+        Ok(ProviderConfig::google_cloud(api_key))
     }
 }

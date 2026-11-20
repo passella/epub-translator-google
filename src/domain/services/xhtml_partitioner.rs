@@ -58,6 +58,13 @@ enum ParsedBlock {
     },
 }
 
+struct PartitionFrame {
+    blocks: std::vec::IntoIter<ParsedBlock>,
+    current_translatable: String,
+    close_tag: Option<String>,
+    depth: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct XhtmlPartitioner {
     threshold: usize,
@@ -71,6 +78,7 @@ impl Default for XhtmlPartitioner {
 
 impl XhtmlPartitioner {
     pub const DEFAULT_THRESHOLD: usize = 100 * 1024;
+    pub const MAX_NESTING_DEPTH: usize = 256;
 
     pub fn new() -> Self {
         Self {
@@ -96,7 +104,7 @@ impl XhtmlPartitioner {
         let (prelude, body_content, postlude) = Self::split_document_shell(html);
         let blocks = Self::parse_top_level_blocks(&body_content);
         let mut segments = Vec::new();
-        Self::group_blocks_into_segments(&blocks, self.threshold, &mut segments);
+        Self::group_blocks_into_segments(blocks, self.threshold, &mut segments);
 
         XhtmlDocumentPlan {
             prelude,
@@ -267,23 +275,40 @@ impl XhtmlPartitioner {
     }
 
     fn group_blocks_into_segments(
-        blocks: &[ParsedBlock],
+        blocks: Vec<ParsedBlock>,
         threshold: usize,
         segments: &mut Vec<PlanSegment>,
     ) {
-        let mut current_translatable = String::new();
+        let mut stack = vec![PartitionFrame {
+            blocks: blocks.into_iter(),
+            current_translatable: String::new(),
+            close_tag: None,
+            depth: 0,
+        }];
 
-        for block in blocks {
+        while let Some(frame) = stack.last_mut() {
+            let Some(block) = frame.blocks.next() else {
+                if let Some(finished) = stack.pop() {
+                    if !finished.current_translatable.is_empty() {
+                        segments.push(PlanSegment::Translatable(finished.current_translatable));
+                    }
+                    if let Some(close_tag) = finished.close_tag {
+                        segments.push(PlanSegment::Verbatim(close_tag));
+                    }
+                }
+                continue;
+            };
+
             match block {
                 ParsedBlock::Verbatim(v) => {
                     if v.trim().is_empty() {
-                        if !current_translatable.is_empty() {
-                            current_translatable.push_str(v);
+                        if !frame.current_translatable.is_empty() {
+                            frame.current_translatable.push_str(&v);
                         } else {
-                            segments.push(PlanSegment::Verbatim(v.clone()));
+                            segments.push(PlanSegment::Verbatim(v));
                         }
                     } else {
-                        current_translatable.push_str(v);
+                        frame.current_translatable.push_str(&v);
                     }
                 }
                 ParsedBlock::Element {
@@ -294,38 +319,42 @@ impl XhtmlPartitioner {
                     close_tag,
                 } => {
                     if full.len() <= threshold {
-                        if !current_translatable.is_empty()
-                            && current_translatable.len() + full.len() > threshold
+                        if !frame.current_translatable.is_empty()
+                            && frame.current_translatable.len() + full.len() > threshold
                         {
                             segments.push(PlanSegment::Translatable(std::mem::take(
-                                &mut current_translatable,
+                                &mut frame.current_translatable,
                             )));
                         }
-                        current_translatable.push_str(full);
-                    } else if *is_container && !inner.trim().is_empty() {
-                        if !current_translatable.is_empty() {
+                        frame.current_translatable.push_str(&full);
+                    } else if is_container
+                        && !inner.trim().is_empty()
+                        && frame.depth < Self::MAX_NESTING_DEPTH
+                    {
+                        if !frame.current_translatable.is_empty() {
                             segments.push(PlanSegment::Translatable(std::mem::take(
-                                &mut current_translatable,
+                                &mut frame.current_translatable,
                             )));
                         }
-                        segments.push(PlanSegment::Verbatim(open_tag.clone()));
-                        let inner_blocks = Self::parse_top_level_blocks(inner);
-                        Self::group_blocks_into_segments(&inner_blocks, threshold, segments);
-                        segments.push(PlanSegment::Verbatim(close_tag.clone()));
+                        segments.push(PlanSegment::Verbatim(open_tag));
+                        let child_depth = frame.depth + 1;
+                        let inner_blocks = Self::parse_top_level_blocks(&inner);
+                        stack.push(PartitionFrame {
+                            blocks: inner_blocks.into_iter(),
+                            current_translatable: String::new(),
+                            close_tag: Some(close_tag),
+                            depth: child_depth,
+                        });
                     } else {
-                        if !current_translatable.is_empty() {
+                        if !frame.current_translatable.is_empty() {
                             segments.push(PlanSegment::Translatable(std::mem::take(
-                                &mut current_translatable,
+                                &mut frame.current_translatable,
                             )));
                         }
-                        segments.push(PlanSegment::Translatable(full.clone()));
+                        segments.push(PlanSegment::Translatable(full));
                     }
                 }
             }
-        }
-
-        if !current_translatable.is_empty() {
-            segments.push(PlanSegment::Translatable(current_translatable));
         }
     }
 
@@ -400,8 +429,13 @@ impl XhtmlPartitioner {
     }
 
     fn find_last_close_tag_start(slice: &str, target_tag: &str) -> Option<usize> {
+        if target_tag.is_empty() {
+            return None;
+        }
         let needle = format!("</{target_tag}");
-        let lower = slice.to_ascii_lowercase();
-        lower.rfind(&needle)
+        slice
+            .as_bytes()
+            .windows(needle.len())
+            .rposition(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
     }
 }

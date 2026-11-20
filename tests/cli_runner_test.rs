@@ -406,3 +406,94 @@ async fn test_cli_runner_headless_invalid_provider_returns_error() {
 
     let _ = std::fs::remove_file(temp_input);
 }
+
+#[test]
+fn test_cli_args_db_cache_global_before_and_after_subcommands() {
+    let missing_value = CliArgs::try_parse_from(["app", "history", "--db-cache"]);
+    assert!(missing_value.is_err());
+
+    let default_history = CliArgs::try_parse_from(["app", "history"]).unwrap();
+    assert_eq!(
+        default_history.db_cache,
+        PathBuf::from("translations_cache.db")
+    );
+
+    let before_history = CliArgs::try_parse_from([
+        "app",
+        "--db-cache",
+        "/tmp/before_history.db",
+        "history",
+        "-l",
+        "5",
+        "-f",
+        "json",
+    ])
+    .unwrap();
+    assert_eq!(
+        before_history.db_cache,
+        PathBuf::from("/tmp/before_history.db")
+    );
+    assert_eq!(
+        before_history.is_history_requested(),
+        Some((5, HistoryFormat::Json))
+    );
+
+    let after_history =
+        CliArgs::try_parse_from(["app", "history", "--db-cache", "/tmp/after_history.db"]).unwrap();
+    assert_eq!(
+        after_history.db_cache,
+        PathBuf::from("/tmp/after_history.db")
+    );
+    assert_eq!(
+        after_history.is_history_requested(),
+        Some((10, HistoryFormat::Table))
+    );
+
+    let mid_history = CliArgs::try_parse_from([
+        "app",
+        "history",
+        "-l",
+        "3",
+        "--db-cache",
+        "/tmp/mid_history.db",
+        "-f",
+        "csv",
+    ])
+    .unwrap();
+    assert_eq!(mid_history.db_cache, PathBuf::from("/tmp/mid_history.db"));
+    assert_eq!(
+        mid_history.is_history_requested(),
+        Some((3, HistoryFormat::Csv))
+    );
+
+    let before_verify = CliArgs::try_parse_from([
+        "app",
+        "--db-cache",
+        "/tmp/before_verify.db",
+        "verify",
+        "b.epub",
+    ])
+    .unwrap();
+    assert_eq!(
+        before_verify.db_cache,
+        PathBuf::from("/tmp/before_verify.db")
+    );
+    assert_eq!(
+        before_verify.is_verify_requested(),
+        Some(PathBuf::from("b.epub").as_path())
+    );
+
+    let after_verify = CliArgs::try_parse_from([
+        "app",
+        "verify",
+        "b.epub",
+        "--db-cache",
+        "/tmp/after_verify.db",
+    ])
+    .unwrap();
+    assert_eq!(after_verify.db_cache, PathBuf::from("/tmp/after_verify.db"));
+    assert_eq!(
+        after_verify.is_verify_requested(),
+        Some(PathBuf::from("b.epub").as_path())
+    );
+}

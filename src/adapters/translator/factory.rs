@@ -226,7 +226,7 @@ impl ProviderRegistry {
             Arc::new(GoogleCloudOptionResolver),
             Arc::new(|config, _cache| match config {
                 ProviderConfig::GoogleCloud { api_key } => Ok(Arc::new(
-                    GoogleCloudTranslatorAdapter::new(api_key.clone())?,
+                    GoogleCloudTranslatorAdapter::new(api_key.as_str())?,
                 )),
                 _ => Err(AppError::Config(
                     "Invalid config for Google Cloud provider".to_string(),
