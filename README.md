@@ -1,5 +1,7 @@
 # 📚 EPUB Translator Google
 
+🌐 **Português (BR)** | [English](README.en.md) | [Español](README.es.md) | [简体中文](README.zh-CN.md)
+
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg?logo=rust)](https://www.rust-lang.org/)
 [![Tokio](https://img.shields.io/badge/async-tokio%201.x-blue.svg?logo=tokio)](https://tokio.rs/)
 [![Architecture](https://img.shields.io/badge/architecture-Hexagonal%20%2F%20Ports%20%26%20Adapters-brightgreen.svg)](#-arquitetura-de-software)
