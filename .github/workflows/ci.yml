@@ -137,6 +137,9 @@ jobs:
   security-audit:
     name: Security Audit (RustSec)
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: write
 
     steps:
       - name: Checkout repository
