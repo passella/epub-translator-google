@@ -1,0 +1,196 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches:
+      - master
+  schedule:
+    - cron: '0 8 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read # Default read-only access for repository contents
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-and-test:
+    name: Format, Clippy & Unit/Integration Tests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # Read-only access for checkout and dependency resolution
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.99.0
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  release-smoke:
+    name: Release Build & CLI Smoke Checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # Read-only access for checkout
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Build release binary and run CLI smoke checks
+        run: |
+          set -euo pipefail
+          SMOKE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/ci-smoke.XXXXXX")"
+          trap 'rm -rf "${SMOKE_DIR}"' EXIT
+
+          cargo build --release --locked
+          ./target/release/epub-translator-google --version
+          ./target/release/epub-translator-google --help
+          SMOKE_DIR="${SMOKE_DIR}" python3 - <<'EOF'
+          import os
+          import zipfile
+
+          smoke_dir = os.environ["SMOKE_DIR"]
+          valid_epub = os.path.join(smoke_dir, "ci_smoke.epub")
+          invalid_epub = os.path.join(smoke_dir, "ci_smoke_invalid.epub")
+
+          with zipfile.ZipFile(valid_epub, 'w') as zf:
+              zf.writestr('mimetype', b'application/epub+zip', compress_type=zipfile.ZIP_STORED)
+              zf.writestr(
+                  'META-INF/container.xml',
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">\n'
+                  '  <rootfiles>\n'
+                  '    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>\n'
+                  '  </rootfiles>\n'
+                  '</container>\n',
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+              zf.writestr(
+                  'OEBPS/content.opf',
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">\n'
+                  '  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
+                  '    <dc:identifier id="uid">urn:uuid:00000000-0000-0000-0000-000000000001</dc:identifier>\n'
+                  '    <dc:title>CI Smoke Test</dc:title>\n'
+                  '    <dc:language>en</dc:language>\n'
+                  '  </metadata>\n'
+                  '  <manifest>\n'
+                  '    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>\n'
+                  '  </manifest>\n'
+                  '  <spine>\n'
+                  '    <itemref idref="ch1"/>\n'
+                  '  </spine>\n'
+                  '</package>\n',
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+              zf.writestr(
+                  'OEBPS/chapter1.xhtml',
+                  '<?xml version="1.0" encoding="UTF-8"?>\n'
+                  '<html xmlns="http://www.w3.org/1999/xhtml">\n'
+                  '  <head><title>Chapter 1</title></head>\n'
+                  '  <body><p>Smoke test content.</p></body>\n'
+                  '</html>\n',
+                  compress_type=zipfile.ZIP_DEFLATED,
+              )
+
+          with zipfile.ZipFile(invalid_epub, 'w') as zf:
+              zf.writestr('mimetype', b'application/epub+zip', compress_type=zipfile.ZIP_DEFLATED)
+          EOF
+          ./target/release/epub-translator-google verify "${SMOKE_DIR}/ci_smoke.epub"
+          if ./target/release/epub-translator-google verify "${SMOKE_DIR}/ci_smoke_invalid.epub"; then
+            echo "Expected verify to fail on invalid EPUB without stored mimetype" >&2
+            exit 1
+          fi
+          HISTORY_JSON="$(./target/release/epub-translator-google --db-cache "${SMOKE_DIR}/empty.db" history --format json)"
+          printf '%s\n' "${HISTORY_JSON}" | python3 -c 'import json, sys; assert json.load(sys.stdin) == []'
+
+  security-audit:
+    name: Security Audit (RustSec)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # Read-only access for repository checkout and cargo audit
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+
+      - name: Run secure cargo-audit
+        run: |
+          set -euo pipefail
+          AUDIT_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/cargo-audit.XXXXXX")"
+          trap 'rm -rf "${AUDIT_DIR}"' EXIT
+
+          CARGO_AUDIT_VERSION="v0.23.0"
+          CARGO_AUDIT_ARCHIVE="cargo-audit-x86_64-unknown-linux-gnu-${CARGO_AUDIT_VERSION}.tgz"
+          CARGO_AUDIT_URL="https://github.com/rustsec/rustsec/releases/download/cargo-audit/${CARGO_AUDIT_VERSION}/${CARGO_AUDIT_ARCHIVE}"
+          CARGO_AUDIT_SHA256="b77993532b253fcbf550996d7716465ec3d734d4e74e7f87bfb65a19add0fb59"
+
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --max-redirs 3 "${CARGO_AUDIT_URL}" -o "${AUDIT_DIR}/${CARGO_AUDIT_ARCHIVE}"
+          printf '%s  %s\n' "${CARGO_AUDIT_SHA256}" "${AUDIT_DIR}/${CARGO_AUDIT_ARCHIVE}" | sha256sum -c -
+          tar --no-same-owner --no-same-permissions -xzf "${AUDIT_DIR}/${CARGO_AUDIT_ARCHIVE}" -C "${AUDIT_DIR}" --strip-components=1
+
+          "${AUDIT_DIR}/cargo-audit" audit --deny warnings
+
+  workflow-audit:
+    name: Workflow Audit (zizmor & actionlint)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # Read-only access for workflow auditing
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor workflow audit
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          inputs: .github/workflows
+          advanced-security: false
+
+      - name: Run actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
