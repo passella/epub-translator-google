@@ -504,4 +504,6 @@ cargo test
 
 本项目基于 [MIT 许可证](LICENSE) 发布。完整法律文本请参阅 [LICENSE](LICENSE) 文件。
 
+版本历史与安全修复记录请参阅 [CHANGELOG.md](CHANGELOG.md)。
+
 关于严格本地处理（100% *Local-First*）、版权（*Fair Use* / 合理使用）、用户责任及各翻译提供商服务条款的详细说明，请参阅我们的[使用、隐私与免责政策 (POLICY.md)](POLICY.md)。

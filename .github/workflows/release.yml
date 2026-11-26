@@ -67,6 +67,12 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      - name: Run cargo-deny policy check
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check
+          arguments: --locked --all-features
+
       - name: Run secure cargo-audit
         run: |
           set -euo pipefail

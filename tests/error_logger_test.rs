@@ -1,10 +1,13 @@
+mod common;
+
+use common::TempDirGuard;
 use epub_translator_google::adapters::error_logger::{ErrorLogger, ExecutionContext, LogTimestamp};
 use epub_translator_google::domain::errors::{
     AppError, ChapterTranslationError, HttpErrorDetails, ProcessErrorDetails, SourceLocation,
     TranslationError,
 };
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[test]
 fn test_diagnose_root_cause_e2big_argument_list_too_long() {
@@ -45,9 +48,9 @@ fn test_diagnose_root_cause_e2big_argument_list_too_long() {
     assert!(ts.filename_base.starts_with("erro_"));
     assert_eq!(ts.filename_base.len(), 28);
 
-    let temp_dir = std::env::temp_dir().join(format!("test_err_logs_{}", ts.nanos));
+    let temp_dir = TempDirGuard::new("test_err_logs");
     let (mut file, log_path) =
-        ErrorLogger::create_log_file_atomic(&temp_dir, &ts.filename_base).unwrap();
+        ErrorLogger::create_log_file_atomic(temp_dir.path(), &ts.filename_base).unwrap();
 
     let backtrace = std::backtrace::Backtrace::force_capture();
     let report = format!("{chapter_err}\n{backtrace}");
@@ -56,7 +59,6 @@ fn test_diagnose_root_cause_e2big_argument_list_too_long() {
     drop(file);
 
     assert!(log_path.exists());
-    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
@@ -67,27 +69,24 @@ fn test_resolve_logs_dir_portable() {
 
 #[test]
 fn test_error_log_anti_collision_numbering() {
-    let ts = LogTimestamp::now();
-    let temp_dir = std::env::temp_dir().join(format!("test_collision_{}", ts.nanos));
-    let base_name = format!("erro_fixed_test_{}", ts.nanos);
+    let temp_dir = TempDirGuard::new("test_collision");
+    let base_name = "erro_fixed_test";
 
-    let (file1, path1) = ErrorLogger::create_log_file_atomic(&temp_dir, &base_name).unwrap();
-    assert_eq!(path1, temp_dir.join(format!("{base_name}.log")));
+    let (file1, path1) = ErrorLogger::create_log_file_atomic(temp_dir.path(), base_name).unwrap();
+    assert_eq!(path1, temp_dir.path().join(format!("{base_name}.log")));
     drop(file1);
 
-    let (file2, path2) = ErrorLogger::create_log_file_atomic(&temp_dir, &base_name).unwrap();
-    assert_eq!(path2, temp_dir.join(format!("{base_name}_1.log")));
+    let (file2, path2) = ErrorLogger::create_log_file_atomic(temp_dir.path(), base_name).unwrap();
+    assert_eq!(path2, temp_dir.path().join(format!("{base_name}_1.log")));
     drop(file2);
 
-    let (file3, path3) = ErrorLogger::create_log_file_atomic(&temp_dir, &base_name).unwrap();
-    assert_eq!(path3, temp_dir.join(format!("{base_name}_2.log")));
+    let (file3, path3) = ErrorLogger::create_log_file_atomic(temp_dir.path(), base_name).unwrap();
+    assert_eq!(path3, temp_dir.path().join(format!("{base_name}_2.log")));
     drop(file3);
 
     assert!(path1.exists());
     assert!(path2.exists());
     assert!(path3.exists());
-
-    let _ = fs::remove_dir_all(&temp_dir);
 }
 
 #[test]
@@ -125,10 +124,10 @@ fn test_error_report_structure_and_sections() {
         cache_db: Some(PathBuf::from("test_cache.db")),
     };
 
-    let temp_logs_dir = Path::new("logs");
-    let _ = fs::create_dir_all(temp_logs_dir);
+    let temp_logs_dir = TempDirGuard::new("test_err_report_structure");
 
-    let generated_path = ErrorLogger::log_error(&chapter_err, &ctx).unwrap();
+    let generated_path =
+        ErrorLogger::log_error_to_dir(temp_logs_dir.path(), &chapter_err, &ctx).unwrap();
     assert!(generated_path.exists());
 
     let content = fs::read_to_string(&generated_path).unwrap();
@@ -171,8 +170,6 @@ fn test_error_report_structure_and_sections() {
     assert!(content.contains("=== 6. GUIA DE RESOLUÇÃO / TROUBLESHOOTING ==="));
     assert!(content.contains("Ações Recomendadas para Humanos:"));
     assert!(content.contains("Ações Recomendadas para Agentes e IAs:"));
-
-    let _ = fs::remove_file(generated_path);
 }
 
 #[test]
@@ -218,10 +215,10 @@ fn test_error_report_http_detailed_logging() {
         cache_db: Some(PathBuf::from("translations_cache.db")),
     };
 
-    let temp_logs_dir = Path::new("logs");
-    let _ = fs::create_dir_all(temp_logs_dir);
+    let temp_logs_dir = TempDirGuard::new("test_err_http_detailed");
 
-    let generated_path = ErrorLogger::log_error(&chapter_err, &ctx).unwrap();
+    let generated_path =
+        ErrorLogger::log_error_to_dir(temp_logs_dir.path(), &chapter_err, &ctx).unwrap();
     assert!(generated_path.exists());
 
     let content = fs::read_to_string(&generated_path).unwrap();
@@ -244,8 +241,6 @@ fn test_error_report_http_detailed_logging() {
     assert!(content.contains("<p>Your client has issued a malformed or illegal request.</p>"));
 
     assert!(content.contains("=== 6. GUIA DE RESOLUÇÃO / TROUBLESHOOTING ==="));
-
-    let _ = fs::remove_file(generated_path);
 }
 
 #[test]
@@ -289,18 +284,16 @@ fn test_error_report_http_429_waf_ip_restriction() {
         cache_db: Some(PathBuf::from("translations_cache.db")),
     };
 
-    let temp_logs_dir = Path::new("logs");
-    let _ = fs::create_dir_all(temp_logs_dir);
+    let temp_logs_dir = TempDirGuard::new("test_err_http_429");
 
-    let generated_path = ErrorLogger::log_error(&chapter_err, &ctx).unwrap();
+    let generated_path =
+        ErrorLogger::log_error_to_dir(temp_logs_dir.path(), &chapter_err, &ctx).unwrap();
     assert!(generated_path.exists());
 
     let content = fs::read_to_string(&generated_path).unwrap();
     assert!(content.contains("HTTP 429 - Rate limit exceeded"));
     assert!(content.contains("WAF/CAPTCHA do Google impôs restrição temporária por IP"));
     assert!(content.contains("--provider antigravity"));
-
-    let _ = fs::remove_file(generated_path);
 }
 
 #[test]
@@ -329,17 +322,15 @@ fn test_error_report_rate_limited_translation_error() {
         cache_db: Some(PathBuf::from("translations_cache.db")),
     };
 
-    let temp_logs_dir = Path::new("logs");
-    let _ = fs::create_dir_all(temp_logs_dir);
+    let temp_logs_dir = TempDirGuard::new("test_err_rate_limited");
 
-    let generated_path = ErrorLogger::log_error(&chapter_err, &ctx).unwrap();
+    let generated_path =
+        ErrorLogger::log_error_to_dir(temp_logs_dir.path(), &chapter_err, &ctx).unwrap();
     assert!(generated_path.exists());
 
     let content = fs::read_to_string(&generated_path).unwrap();
     assert!(content.contains("Provider Rate Limit Exceeded / WAF IP Restriction"));
     assert!(content.contains("--provider antigravity"));
-
-    let _ = fs::remove_file(generated_path);
 }
 
 #[test]

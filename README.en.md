@@ -504,4 +504,6 @@ cargo test
 
 This project is distributed under the [MIT License](LICENSE). For the full legal text, see the [LICENSE](LICENSE) file.
 
+Version history and security fixes are documented in [CHANGELOG.md](CHANGELOG.md).
+
 For detailed guidelines on strictly local processing (100% *Local-First*), copyright (*Fair Use*), user responsibility, and translation provider terms of service, see our [Usage, Privacy, and Disclaimer Policy (POLICY.md)](POLICY.md).

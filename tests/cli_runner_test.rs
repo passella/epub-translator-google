@@ -1,4 +1,7 @@
+mod common;
+
 use clap::Parser;
+use common::TempDirGuard;
 use epub_translator_google::adapters::cache::SqliteCacheAdapter;
 use epub_translator_google::adapters::cli::{
     CliArgs, CliCommand, CliRunner, HistoryFormat, ProviderConfigResolver,
@@ -251,8 +254,8 @@ fn test_format_history_table_single_and_multiple_records() {
 
 #[tokio::test]
 async fn test_render_history_empty_database_all_formats() {
-    let temp_db = std::env::temp_dir().join("test_history_empty_formats.db");
-    let _ = std::fs::remove_file(&temp_db);
+    let temp_dir = TempDirGuard::new("cli_runner_history_empty");
+    let temp_db = temp_dir.path().join("history_empty_formats.db");
 
     assert!(
         CliRunner::render_history(&temp_db, 10, HistoryFormat::Table)
@@ -269,14 +272,12 @@ async fn test_render_history_empty_database_all_formats() {
             .await
             .is_ok()
     );
-
-    let _ = std::fs::remove_file(temp_db);
 }
 
 #[tokio::test]
 async fn test_render_history_with_recorded_metrics() {
-    let temp_db = std::env::temp_dir().join("test_history_records.db");
-    let _ = std::fs::remove_file(&temp_db);
+    let temp_dir = TempDirGuard::new("cli_runner_history_records");
+    let temp_db = temp_dir.path().join("history_records.db");
 
     let cache = SqliteCacheAdapter::new(&temp_db).unwrap();
     let metrics = ExecutionMetrics {
@@ -320,8 +321,6 @@ async fn test_render_history_with_recorded_metrics() {
     })
     .await;
     assert!(run_sub_result.is_ok());
-
-    let _ = std::fs::remove_file(temp_db);
 }
 
 #[tokio::test]
@@ -344,12 +343,13 @@ async fn test_cli_runner_headless_missing_input_returns_error() {
 
 #[tokio::test]
 async fn test_cli_runner_headless_missing_target_returns_error() {
-    let temp_input = std::env::temp_dir().join("test_cli_runner_missing_target.epub");
-    let _ = std::fs::write(&temp_input, b"dummy epub content");
+    let temp_dir = TempDirGuard::new("cli_runner_missing_target");
+    let temp_input = temp_dir.path().join("missing_target.epub");
+    std::fs::write(&temp_input, b"dummy epub content").unwrap();
 
     let args = CliArgs {
         headless: true,
-        input: Some(temp_input.clone()),
+        input: Some(temp_input),
         target: None,
         ..Default::default()
     };
@@ -361,16 +361,18 @@ async fn test_cli_runner_headless_missing_target_returns_error() {
         }
         other => panic!("Expected AppError::Config, got {other:?}"),
     }
-
-    let _ = std::fs::remove_file(temp_input);
 }
 
 #[tokio::test]
 async fn test_cli_runner_headless_missing_file_returns_error() {
+    let temp_dir = TempDirGuard::new("cli_runner_missing_file");
+    let missing_input = temp_dir.path().join("non_existent_file_xyz123.epub");
+    let temp_output = temp_dir.path().join("output.epub");
+
     let args = CliArgs {
         headless: true,
-        input: Some(PathBuf::from("/tmp/non_existent_file_xyz123.epub")),
-        output: Some(PathBuf::from("/tmp/output.epub")),
+        input: Some(missing_input),
+        output: Some(temp_output),
         source: Some("en".to_string()),
         target: Some("pt-BR".to_string()),
         provider: Some("google-free".to_string()),
@@ -388,13 +390,15 @@ async fn test_cli_runner_headless_missing_file_returns_error() {
 
 #[tokio::test]
 async fn test_cli_runner_headless_invalid_provider_returns_error() {
-    let temp_input = std::env::temp_dir().join("test_cli_runner_input.epub");
-    let _ = std::fs::write(&temp_input, b"dummy epub content");
+    let temp_dir = TempDirGuard::new("cli_runner_invalid_provider");
+    let temp_input = temp_dir.path().join("input.epub");
+    let temp_output = temp_dir.path().join("output.epub");
+    std::fs::write(&temp_input, b"dummy epub content").unwrap();
 
     let args = CliArgs {
         headless: true,
-        input: Some(temp_input.clone()),
-        output: Some(PathBuf::from("/tmp/output.epub")),
+        input: Some(temp_input),
+        output: Some(temp_output),
         source: Some("en".to_string()),
         target: Some("pt-BR".to_string()),
         provider: Some("invalid-provider-xyz".to_string()),
@@ -403,8 +407,6 @@ async fn test_cli_runner_headless_invalid_provider_returns_error() {
 
     let result = CliRunner::run(args).await;
     assert!(result.is_err());
-
-    let _ = std::fs::remove_file(temp_input);
 }
 
 #[test]
@@ -496,4 +498,22 @@ fn test_cli_args_db_cache_global_before_and_after_subcommands() {
         after_verify.is_verify_requested(),
         Some(PathBuf::from("b.epub").as_path())
     );
+}
+
+#[test]
+fn test_cli_args_version_flag_matches_cargo_pkg_version() {
+    let err = CliArgs::try_parse_from(["epub-translator-google", "--version"]).unwrap_err();
+    assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    let rendered = err.to_string();
+    assert!(rendered.contains(env!("CARGO_PKG_VERSION")));
+
+    if let Some(bin_path) = option_env!("CARGO_BIN_EXE_epub-translator-google") {
+        let output = std::process::Command::new(bin_path)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+    }
 }

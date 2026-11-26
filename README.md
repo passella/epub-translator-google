@@ -504,4 +504,6 @@ cargo test
 
 Este projeto é distribuído sob a [Licença MIT](LICENSE). Para o texto legal completo, consulte o arquivo [LICENSE](LICENSE).
 
+O histórico de versões e correções de segurança está documentado em [CHANGELOG.md](CHANGELOG.md).
+
 Para diretrizes detalhadas sobre processamento estritamente local (100% *Local-First*), direitos autorais (*Fair Use* / Uso Justo), responsabilidade do usuário e termos de serviço dos provedores de tradução, consulte a nossa [Política de Uso, Privacidade e Isenção de Responsabilidade (POLICY.md)](POLICY.md).

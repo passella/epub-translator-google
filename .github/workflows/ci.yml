@@ -141,16 +141,22 @@ jobs:
           printf '%s\n' "${HISTORY_JSON}" | python3 -c 'import json, sys; assert json.load(sys.stdin) == []'
 
   security-audit:
-    name: Security Audit (RustSec)
+    name: Security & Policy Audit (RustSec & cargo-deny)
     runs-on: ubuntu-24.04
     permissions:
-      contents: read # Read-only access for repository checkout and cargo audit
+      contents: read # Read-only access for repository checkout, cargo-audit, and cargo-deny
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Run cargo-deny policy check
+        uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4
+        with:
+          command: check
+          arguments: --locked --all-features
 
       - name: Install Rust toolchain
         run: |
@@ -189,7 +195,7 @@ jobs:
       - name: Run zizmor workflow audit
         uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
         with:
-          inputs: .github/workflows
+          inputs: .github
           advanced-security: false
 
       - name: Run actionlint
